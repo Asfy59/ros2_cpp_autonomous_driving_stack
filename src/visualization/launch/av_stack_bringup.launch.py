@@ -120,14 +120,28 @@ def generate_launch_description() -> LaunchDescription:
                     "vehicle_sensor_link": vehicle_sensor_link,
                 }.items(),
             ),
+            # Node(
+            # package='fusion_core',
+            # name="fusion",
+            # executable='fusion_core',
+            # remappings={
+            #         ("camera_topic", "p2_img"),
+            # }
             Node(
-            package='fusion_core',
-            name="fusion",
-            executable='fusion_core',
-            remappings={
-                    ("camera_topic", "p2_img"),
-            }
-        
-    )
+                package='lidar_processing',
+                name="lidar_processing",
+                executable='lidar_processing',
+                remappings=[
+                    ("lidar_in", "lidar_pc"),
+                    ("lidar_out", "processed_lidar_pc")
+                ],
+                # parameters=[
+                #     {"processing_rate": 10.0},
+                #     {"crop_box_min": [-5.0, -15.0, -2.0]},
+                #     {"crop_box_max": [30.0, 15.0, 2.0]},
+                #     {"voxel_leaf_size": [0.2, 0.2, 0.2]},
+                #     {"enable_ground_segmentation": True},
+                # ],
+            ),
         ]
     )
