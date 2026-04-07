@@ -22,10 +22,10 @@ from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 from typing import List
 
-POINT_CLOUD_FOLDER_AVAILABLE = True
-GRAY_IMAGES_FOLDER_AVAILABLE = True
+POINT_CLOUD_FOLDER_AVAILABLE = False
+GRAY_IMAGES_FOLDER_AVAILABLE = False
 COLOUR_IMAGES_FOLDER_AVAILABLE = True
-DATASET_PATH = os.environ.get("KITTI_DATASET_PATH", str(Path().home() / "kitti_dataset"))
+DATASET_PATH = os.environ.get("kitti_dataset")
 
 
 def launch_setup(context: LaunchContext) -> List[LaunchDescription]:
