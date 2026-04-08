@@ -88,25 +88,22 @@ Current custom progress:
 - `camera_processing`: scaffold only
 - `replay_adapter`: not required yet
 
-## Planned Camera Integration
+## Planned Camera Processing
 
-My current plan for camera-side perception is to integrate an existing ROS2 YOLO pipeline rather than build a detector from scratch.
+The camera-side perception layer is planned as a custom `camera_processing` package rather than a direct wrapper around an external detector repository.
 
-Candidate external package:
+Current direction:
 
-- `Geekgineer/ros2_yolos_cpp`
-- https://github.com/Geekgineer/ros2_yolos_cpp
+- start with a single camera input, using `p2_img`
+- keep the first version monocular rather than stereo
+- handle image subscription, preprocessing, and camera-side candidate extraction in ROS2/C++
+- publish a clean camera-side output that can later be consumed by `fusion_core`
 
-Planned usage:
+This keeps the camera stack aligned with the rest of the project:
 
-- keep `ros2_yolos_cpp` as an external integrated dependency
-- use `camera_processing` as the project-specific adapter/integration layer if needed
-- feed normalized camera detections into `fusion_core`
-
-Notes:
-
-- `ros2_yolos_cpp` is a third-party package and will be credited separately from the custom work in this repo
-- it is licensed under `AGPL-3.0`
+- `lidar_processing` owns LiDAR-side preprocessing
+- `camera_processing` will own camera-side preprocessing
+- `fusion_core` will own cross-sensor fusion, tracking, and decision logic
 
 ## Current Pipeline
 
