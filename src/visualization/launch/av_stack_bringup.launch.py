@@ -135,13 +135,13 @@ def generate_launch_description() -> LaunchDescription:
                     ("lidar_in", "lidar_pc"),
                     ("lidar_out", "processed_lidar_pc")
                 ],
-                # parameters=[
-                #     {"processing_rate": 10.0},
-                #     {"crop_box_min": [-5.0, -15.0, -2.0]},
-                #     {"crop_box_max": [30.0, 15.0, 2.0]},
-                #     {"voxel_leaf_size": [0.2, 0.2, 0.2]},
-                #     {"enable_ground_segmentation": True},
-                # ],
+                parameters=[
+                    {"processing_rate": 10.0},
+                    {"crop_box_min": [-10.0, -20.0, -2.0]},
+                    {"crop_box_max": [30.0, 20.0, 2.0]},
+                    {"voxel_leaf_size": [0.1, 0.1, 0.1]},
+                    {"enable_ground_segmentation": True},
+                ],
             ),
         ]
     )
