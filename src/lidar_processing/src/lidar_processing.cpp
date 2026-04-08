@@ -8,15 +8,31 @@
 #include <pcl/filters/crop_box.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
+#include <pcl/common/angles.h>
 
 class LidarProcessing : public rclcpp::Node
 {
 public:
     LidarProcessing() : Node("lidar_processing")
     {
-        RCLCPP_INFO(this->get_logger(), "LidarProcessing node has been started");
+        this->declare_parameter<double>("processing_rate", 10.0);
+        this->declare_parameter<std::vector<double>>("crop_box_min", {-5.0, -15.0, -2.0});
+        this->declare_parameter<std::vector<double>>("crop_box_max", {30.0, 15.0, 2.0});
+        this->declare_parameter<std::vector<double>>("voxel_leaf_size", {0.1, 0.1, 0.1});
+        this->declare_parameter<bool>("enable_ground_segmentation", true);
+
+        this->get_parameter("processing_rate", processing_rate_);
+        this->get_parameter("crop_box_min", crop_box_min_);
+        this->get_parameter("crop_box_max", crop_box_max_);
+        this->get_parameter("voxel_leaf_size", voxel_leaf_size_);
+        this->get_parameter("enable_ground_segmentation", enable_ground_segmentation_);
+        
+        crop_box_min_vec = Eigen::Vector4f(crop_box_min_[0], crop_box_min_[1], crop_box_min_[2], 1.0);
+        crop_box_max_vec = Eigen::Vector4f(crop_box_max_[0], crop_box_max_[1], crop_box_max_[2], 1.0);
+        voxel_leaf_size_vec = Eigen::Vector4f(voxel_leaf_size_[0], voxel_leaf_size_[1], voxel_leaf_size_[2], 1.0);
+
         processing_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(100),
+            processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
             std::bind(&LidarProcessing::process_latest_point_cloud, this));
         lidar_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "lidar_in",
@@ -25,6 +41,9 @@ public:
         processed_cloud_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             "lidar_out",
             10);
+
+        RCLCPP_INFO(this->get_logger(), "LidarProcessing node has been initialized.");
+
     }
 
     void lidar_subscriber_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -63,10 +82,17 @@ public:
         // call the voxelization function
         auto voxelized_pc = voxelize_pc(cropped_pcl);
         // call the ground plane segmentation function
-        auto segmented_pc = segmentGround(voxelized_pc);
+        if (enable_ground_segmentation_)
+        {
+            auto segmented_pc = segmentGround(voxelized_pc);
+            publish_processed_cloud(segmented_pc);
+        }
+        else
+        {
+            publish_processed_cloud(voxelized_pc);
+        }
         // call the clustering function(optional)
         // publish what we have processed so far
-        publish_processed_cloud(segmented_pc);
     }
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr convert_ros2_pc_to_pcl(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud)
@@ -82,8 +108,8 @@ public:
         // Implement cropping using a box filter or other methods
         pcl::CropBox<pcl::PointXYZI> crop_filter;
         crop_filter.setInputCloud(cloud);
-        crop_filter.setMin(Eigen::Vector4f(-5.0, -15.0, -2.0, 1.0)); // Set the minimum point of the box
-        crop_filter.setMax(Eigen::Vector4f(30.0, 15.0, 2.0, 1.0));    // Set the maximum point of the box
+        crop_filter.setMin(crop_box_min_vec); // Set the minimum point of the box
+        crop_filter.setMax(crop_box_max_vec);    // Set the maximum point of the box
         auto cropped_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
         crop_filter.filter(*cropped_cloud);
 
@@ -101,7 +127,7 @@ public:
         // Perform voxelization on the PCL point cloud
         pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
         voxel_filter.setInputCloud(cloud);
-        voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f); // Set the voxel size (m)
+        voxel_filter.setLeafSize(voxel_leaf_size_vec); // Set the voxel size (m)
         auto voxelized_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
         voxel_filter.filter(*voxelized_cloud);
 
@@ -116,6 +142,9 @@ public:
         seg.setModelType(pcl::SACMODEL_PLANE);
         seg.setMethodType(pcl::SAC_RANSAC);
         seg.setDistanceThreshold(0.2); // Set the distance threshold for inliers
+        seg.setMaxIterations(100);       // Set the maximum number of iterations for RANSAC
+        seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0)); // Set the axis for ground plane segmentation
+        seg.setEpsAngle(pcl::deg2rad(10.0)); // Set the angle threshold for ground plane segmentation
         pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
         pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
         seg.setInputCloud(cloud);
@@ -164,6 +193,14 @@ private:
     std::mutex cloud_mutex_;
     rclcpp::TimerBase::SharedPtr processing_timer_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr processed_cloud_publisher_;
+    double processing_rate_;
+    std::vector<double> crop_box_min_;
+    std::vector<double> crop_box_max_;
+    std::vector<double> voxel_leaf_size_;
+    bool enable_ground_segmentation_;
+    Eigen::Vector4f crop_box_min_vec;
+    Eigen::Vector4f crop_box_max_vec;
+    Eigen::Vector4f voxel_leaf_size_vec;
 };
 
 int main(int argc, char *argv[])
