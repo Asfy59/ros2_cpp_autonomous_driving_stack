@@ -1,142 +1,236 @@
 # ROS2 C++ Sensor Fusion Mini-Stack for Autonomous Driving
 
+## Objective
 
----
+This repository is a ROS2 C++ autonomous driving mini-stack built around KITTI replay.
 
-## 1. Objective
+The goal is to build a compact, readable portfolio project that demonstrates:
 
-Build a compact, reproducible ROS2 C++ portfolio project that demonstrates:
+- ROS2 node/package architecture
+- modern C++ ownership and pipeline design
+- LiDAR and camera ingestion from KITTI replay
+- object-level fusion and tracking
+- behavior-level output such as `GO`, `SLOW`, `STOP`
 
-- ROS2 node architecture and separation of concerns
-- Modern C++ ownership and interface design
-- Camera + LiDAR ingestion, late/object-level fusion, and tracking
-- Behavior-level safety decision output (GO/SLOW/STOP)
-- Practical DDS/QoS reasoning
-- Disciplined Git workflow with tests and CI
+## Current Status
 
----
+The project currently has:
 
-## 2. Scope
+- KITTI replay infrastructure from the `ros2_kitti_*` packages
+- URDF/TF and RViz visualization support
+- optional odometry integration from the `ros2_kitti` stack
+- a custom `lidar_processing` node that:
+  - subscribes to replayed LiDAR data
+  - crops the ROI
+  - voxelizes the cloud
+  - optionally removes the ground plane with RANSAC
+  - publishes a processed LiDAR point cloud
 
-### In scope
+Still in progress:
 
-- ROS2 C++ packages and modules
-- Small curated KITTI subset as replay source
-- Custom KITTI replay adapter (avoid starting with rosbag conversion)
-- Camera + LiDAR input handling
-- Late/object-level fusion and basic tracking core
-- Simple behavior-level safety decision logic
-- Core unit tests + CI
-- Documentation and clear Git history
+- camera processing
+- fusion/tracking
+- behavior decision output
+- tests/CI beyond the current helper scripts and existing upstream tests
 
-### Out of scope
+## Repo Organization
 
-- Full KITTI ingestion framework
-- Detector training or full perception model development
-- Raw end-to-end point cloud object detection
-- Advanced behavior planning or full trajectory optimization
-- Vehicle control stack, SLAM/localization stack
-- Production-level real-time optimization
-- Rosbag conversion as required for v1
+This repo contains two kinds of packages.
 
----
+## Attribution
 
-## 3. Data strategy
+This project builds on and integrates the `ros2_kitti_*` replay/visualization stack from:
 
-- Use a small, curated KITTI subset (camera, LiDAR, optional pose/odometry)
-- KITTI is replayed, not treated as the core challenge
-- Rule: do not start with rosbag conversion; prove pipeline with custom replay adapter first
+- `tengfoonglam/kitti_odometry_replayer_ros2`
+- https://github.com/tengfoonglam/kitti_odometry_replayer_ros2
 
----
+This repository builds on that upstream project for the KITTI replay, URDF/TF, RViz, message, and odometry infrastructure.
 
-## 4. Deliverables
+![ros2_kitti upstream reference](docs/ros2_kitti.png)
 
-### Mandatory output
+My project-specific work in this repository is focused on the custom processing and fusion layer, including packages such as:
 
-- Fused tracked object list
-- Safety-aware decision state: `GO`, `SLOW`, `STOP`
+- `lidar_processing`
+- `camera_processing`
+- `fusion_core`
+- `visualization`
 
-### Optional output (v1 optional)
+### Integrated / upstream-style infrastructure
 
-- Local target path or trajectory marker (not required in v1)
+These provide the replay, TF, description, RViz, and odometry base:
 
-### Core pipeline
+- `ros2_kitti_core`
+- `ros2_kitti_replay`
+- `ros2_kitti_description`
+- `ros2_kitti_msgs`
+- `ros2_kitti_odom`
+- `ros2_kitti_odom_kiss_icp`
+- `ros2_kitti_odom_open3d`
+- `ros2_kitti_rviz_plugin`
 
-`KITTI replay -> sensor streams -> fusion/tracking -> behavior decision -> visualization/logging`
+I treat these packages as the infrastructure layer rather than the main portfolio focus.
 
----
+### Custom project packages
 
-## 5. Reproducibility criteria
+These are the packages where the project-specific work is being implemented:
 
-Another developer should be able to:
+- `lidar_processing`
+- `camera_processing`
+- `fusion_core`
+- `replay_adapter`
+- `visualization`
 
-1. Build the project
-2. Run the stack
-3. Replay a small scenario
-4. Observe fused object output and behavior decisions
+Current custom progress:
 
----
+- `lidar_processing`: active and working
+- `visualization`: owns app-level bringup launch
+- `fusion_core`: early scaffold
+- `camera_processing`: scaffold only
+- `replay_adapter`: not required yet
 
-## 6. Project goals
+## Planned Camera Integration
 
-### Goal 1 — technical
+My current plan for camera-side perception is to integrate an existing ROS2 YOLO pipeline rather than build a detector from scratch.
 
-- Clear ROS2 architecture with core logic in libraries and light ROS wrappers.
+Candidate external package:
 
-### Goal 2 — C++ quality
+- `Geekgineer/ros2_yolos_cpp`
+- https://github.com/Geekgineer/ros2_yolos_cpp
 
-- Explicit ownership, smart pointers, interfaces, and object lifetime handling
-- Copy vs move semantics where relevant
+Planned usage:
 
-### Goal 3 — system understanding
+- keep `ros2_yolos_cpp` as an external integrated dependency
+- use `camera_processing` as the project-specific adapter/integration layer if needed
+- feed normalized camera detections into `fusion_core`
 
-- Topic/message flow, node boundaries, replay pipeline, DDS/QoS design
+Notes:
 
-### Goal 4 — portfolio
+- `ros2_yolos_cpp` is a third-party package and will be credited separately from the custom work in this repo
+- it is licensed under `AGPL-3.0`
 
-- Clean repo with README, docs, tests, CI, demo, meaningful commit history
+## Current Pipeline
 
-### Goal 5 — scope discipline
+Current end-to-end flow:
 
-- Finish a working reduction in 3 weeks without scope creep into dataset/advanced planning
+`KITTI replay -> /lidar_pc -> lidar_processing -> /processed_lidar_pc -> RViz`
 
----
+Planned later flow:
 
-## 7. Success criteria
+`KITTI replay -> camera + lidar -> processing -> fusion/tracking -> decision -> visualization`
 
-### Functional
+## What KITTI Provides vs What This Repo Adds
 
-- Selected KITTI scenario replays pass
-- Camera and LiDAR data ingest works
-- Fused tracked objects are produced
-- Safety decision state updates with scene state
-- End-to-end launch reproduces expected behavior
+### Raw KITTI provides
 
-### Engineering
+- timestamps
+- LiDAR scans
+- camera images
+- calibration
+- pose / ground-truth trajectory for supported odometry sequences
 
-- Thin ROS wrappers and separate core logic
-- Meaningful feature branches and commits
-- Unit tests for fusion/tracking core
-- CI passes
-- Architecture/design notes are written
+Dataset reference:
 
-### Learning
+- KITTI Odometry Dataset
+- https://www.cvlibs.net/datasets/kitti/eval_odometry.php
 
-Document:
+![KITTI dataset reference](docs/kitti_dataset.png)
 
-- Why object-level fusion is chosen
-- Why trajectory generation is reduced
-- Ownership decisions (`shared_ptr` vs `unique_ptr`)
-- QoS assumptions and design
-- What was intentionally cut for v1
+### This repo adds
 
----
+- ROS2 topics and message publishing
+- frame IDs and timestamps on messages
+- TF tree and URDF loading
+- replay controls and RViz integration
+- custom LiDAR preprocessing node
 
-## 8. Risks and mitigations
+## LiDAR Processing Node
 
-- Dataset overhead: small KITTI subset + replay first; postpone rosbag
-- Planning scope explosion: output is decision state not full planner
-- Weak C++ focus: core fusion/tracking libraries and documented ownership
-- DDS/ROS2 superficiality: document QoS and callback/node design
-- Git cosmetic history: branch-per-feature + coherent commits
-- Trying to do too much: strict v1 and cut non-essential features
+The `lidar_processing` node currently performs:
+
+1. latest-message buffering outside the callback
+2. ROS `PointCloud2` to PCL conversion
+3. ROI crop with `pcl::CropBox`
+4. voxel downsampling with `pcl::VoxelGrid`
+5. optional ground removal with `pcl::SACSegmentation` and `pcl::ExtractIndices`
+6. publication of `/processed_lidar_pc`
+
+Current configurable parameters:
+
+- `processing_rate`
+- `crop_box_min`
+- `crop_box_max`
+- `voxel_leaf_size`
+- `enable_ground_segmentation`
+
+These are configured in the app bringup launch:
+
+- [av_stack_bringup.launch.py](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/visualization/launch/av_stack_bringup.launch.py)
+
+## LiDAR Processing Visuals
+
+Current before/after visualization for the preprocessing stage:
+
+- raw replayed LiDAR point cloud on `/lidar_pc`
+- processed LiDAR point cloud on `/processed_lidar_pc`
+- side-by-side comparison showing the effect of ROI cropping, voxelization, and optional ground removal
+
+![Raw vs processed LiDAR point cloud](docs/lidar_raw_vs_processed.png)
+
+This should make the `lidar_processing` package easier to evaluate as a standalone perception module.
+
+## TF / URDF / Timestamp Notes
+
+For later fusion work, the important message fields are:
+
+- `header.stamp`
+- `header.frame_id`
+
+In the current replay stack:
+
+- `header.stamp` comes from KITTI `times.txt`
+- LiDAR `header.frame_id` is set by the replay node to a prefixed LiDAR frame
+- camera `header.frame_id` is set by the replay node to prefixed camera frames such as `p2`
+- URDF + `robot_state_publisher` define the fixed sensor geometry
+- replay / odometry nodes provide motion transforms over time
+
+This is the basis for future sensor alignment and fusion.
+
+## Running The Current Stack
+
+Build:
+
+```bash
+colcon build --packages-select lidar_processing visualization
+source install/setup.bash
+```
+
+Launch:
+
+```bash
+ros2 launch visualization av_stack_bringup.launch.py dataset_path:=/path/to/kitti_dataset dataset_number:=0
+```
+
+Current LiDAR topics of interest:
+
+- `/lidar_pc`
+- `/processed_lidar_pc`
+
+## Development Notes
+
+- I use `ros2_kitti_*` as the base/integration layer
+- I add custom work on top of that layer rather than deeply refactoring the upstream stack
+- the main app entrypoint is the custom bringup launch in `visualization`
+
+## Roadmap
+
+- [x] Integrate KITTI replay and visualization infrastructure
+- [x] Add custom LiDAR preprocessing node
+- [x] Add LiDAR preprocessing parameters in bringup
+- [x] Add a basic LiDAR raw-vs-processed comparison script
+- [x] Capture and document LiDAR preprocessing visuals
+- [ ] Add camera processing node
+- [ ] Implement fusion and tracking in `fusion_core`
+- [ ] Publish tracked object outputs
+- [ ] Publish decision output such as `GO`, `SLOW`, `STOP`
+- [ ] Improve automated tests
+- [ ] Add CI and polish documentation
