@@ -4,3 +4,5 @@ log/
 kitti_dataset/
 .vscode/
 .codex
+__pycache__/
+*.pyc
