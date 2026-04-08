@@ -1,0 +1,9 @@
+std_msgs/Header header
+uint32 track_id
+geometry_msgs/Pose pose
+geometry_msgs/Vector3 dimensions
+geometry_msgs/Vector3 velocity
+float32 existence_probability
+string classification
+bool from_lidar
+bool from_camera

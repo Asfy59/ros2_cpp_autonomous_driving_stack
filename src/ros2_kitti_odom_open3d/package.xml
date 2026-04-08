@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format2.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="2">
+  <name>ros2_kitti_odom_open3d</name>
+  <version>0.1.0</version>
+  <description>Odometry node using Open3D</description>
+  <maintainer email="tengfoonglam@yahoo.com.sg">Lam Teng Foong</maintainer>
+  <license>BSD 3-clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>eigen3_cmake_module</build_depend>
+  <build_depend>rclcpp</build_depend>
+  <build_depend>rclcpp_components</build_depend>
+  <build_depend>libopen3d-dev</build_depend>
+  <build_depend>open3d_conversions</build_depend>
+  <build_depend>ros2_kitti_core</build_depend>
+  <build_depend>ros2_kitti_odom</build_depend>
+  <build_depend>tf2</build_depend>
+  <build_depend>tf2_eigen</build_depend>
+  <build_depend>tf2_geometry_msgs</build_depend>
+  <build_depend>yaml-cpp</build_depend>
+
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>ros2_kitti_replay</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+   <build_type>ament_cmake</build_type>
+  </export>
+</package>
