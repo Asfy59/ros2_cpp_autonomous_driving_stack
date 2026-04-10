@@ -11,13 +11,16 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(vision_msgs REQUIRED)
-
+find_package(OpenCV REQUIRED)
+# find_package(onnxruntime REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
-add_executable(camera_processing src/camera_processing.cpp)
+add_executable(camera_processing src/camera_processing.cpp src/yolo_detector.cpp)
 ament_target_dependencies(camera_processing rclcpp sensor_msgs cv_bridge vision_msgs)
+
+target_include_directories(camera_processing PUBLIC include)
 
 install(TARGETS
   camera_processing

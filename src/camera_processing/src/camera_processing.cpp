@@ -3,7 +3,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include "vision_msgs/msg/bounding_box2_d.hpp"
-//#include <camera_processing/yolo_detector.hpp>
+#include <camera_processing/yolo_detector.hpp>
 
 class CameraProcessing : public rclcpp::Node
 {
@@ -11,17 +11,18 @@ public:
     CameraProcessing() : Node("camera_processing")
     {
         this->declare_parameter<double>("processing_rate", 10.0);
-        //this->declare_parameter < std::string >> ("model_path", "./model/yolo/model.onnx");
+        this->declare_parameter < std::string > ("model_path", "./model/yolo/model.onnx");
         // this->declare_parameter<std::vector<double>>("crop_box_max", {30.0, 15.0, 2.0});
         // this->declare_parameter<std::vector<double>>("voxel_leaf_size", {0.1, 0.1, 0.1});
         // this->declare_parameter<bool>("enable_ground_segmentation", true);
 
         this->get_parameter("processing_rate", processing_rate_);
-        //this->get_parameter("model_path", model_path_);
+        this->get_parameter("model_path", model_path_);
         // this->get_parameter("crop_box_min", crop_box_min_);
         // this->get_parameter("crop_box_max", crop_box_max_);
         // this->get_parameter("voxel_leaf_size", voxel_leaf_size_);
         // this->get_parameter("enable_ground_segmentation", enable_ground_segmentation_);
+        yolo_detector_ = std::make_unique<YoloDetector>(model_path_);
 
         processing_timer_ = this->create_wall_timer(
             processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
@@ -49,7 +50,7 @@ public:
 
     void process_latest_image()
     {
-
+        cv::Mat frame_image;
         sensor_msgs::msg::Image::SharedPtr image_to_process_;
 
         {
@@ -66,6 +67,7 @@ public:
                 // No new image available, skip processing
                 return;
             }
+
         }
 
         // convert ROS2 image message to OpenCV format to be proceessed by yolo
@@ -75,8 +77,8 @@ public:
                 RCLCPP_ERROR(this->get_logger(), "Failed to convert ROS2 image to OpenCV format.");
                 return;
             }
-
-        //detection_results_ = yolo_detector.infer(frame_image);
+        frame_image = yolo_detector_->preprocess(frame_image);
+        auto detections = yolo_detector_->infer(frame_image);
         // puiblish the detection results with bounding boxes
         //publish_object_detections(detection_results_);
         //  publish the processed image with bounding boxes(optional)
@@ -99,11 +101,11 @@ public:
         }
     }
 
-    void publish_object_detections(const vision_msgs::msg::BoundingBox2D &detections)
+    void publish_object_detections(const std::vector<yolo_detection_result> &detections)
     {
         // Publish the detected bounding boxes
 
-            object_bbox_publisher_->publish(detections);
+            //object_bbox_publisher_->publish(detections);
 
     }
 
@@ -114,8 +116,7 @@ private:
     sensor_msgs::msg::Image::SharedPtr latest_image_;
     std::string model_path_;
     bool new_image_available_{false};
-    cv::Mat frame_image;
-    //std::vector<yolo_detection_result> detection_results_;
+    std::unique_ptr<YoloDetector> yolo_detector_;
     rclcpp::TimerBase::SharedPtr processing_timer_;
     rclcpp::Publisher<vision_msgs::msg::BoundingBox2D>::SharedPtr object_bbox_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_image_publisher_;

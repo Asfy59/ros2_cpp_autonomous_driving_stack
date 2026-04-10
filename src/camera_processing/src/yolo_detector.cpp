@@ -1,13 +1,13 @@
 #include <camera_processing/yolo_detector.hpp>
 
-YoloDetector::YoloDetector(const std::string &model_path) : env_(ORT_LOGGING_LEVEL_WARNING, "YoloDetector"), session_options_(), session_(nullptr)
+YoloDetector::YoloDetector(const std::string &model_path)
 {
-    session_options_.SetIntraOpNumThreads(1);
-    session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-    session_ = Ort::Session(env_, model_path.c_str(), session_options_);
+
+    //load model using ONNX Runtime
+    printf(model_path.c_str());
 } 
 
-YoloDetector::preprocess(const cv::Mat &image)
+cv::Mat YoloDetector::preprocess(const cv::Mat &image)
 {
     // Implement preprocessing steps such as resizing, normalization, etc.
     // This is a placeholder implementation and should be replaced with actual preprocessing logic.
@@ -18,7 +18,7 @@ YoloDetector::preprocess(const cv::Mat &image)
 }
 
 
-YoloDetector::infer(const cv::Mat &image, std::vector<cv::Rect> &boxes, std::vector<float> &confidences)
+std::vector<yolo_detection_result>YoloDetector::infer(const cv::Mat &image)
 {
     // Implement inference logic using ONNX Runtime
     // This is a placeholder implementation and should be replaced with actual inference logic.
