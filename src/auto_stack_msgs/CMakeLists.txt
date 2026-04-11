@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(camera_processing)
+project(auto_stack_msgs)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -7,35 +7,25 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(vision_msgs REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(auto_stack_msgs REQUIRED)
-# find_package(onnxruntime REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
-set(ONNXRUNTIME_ROOT "/usr/local/onnxruntime")
 
-add_executable(camera_processing src/camera_processing.cpp src/yolo_detector.cpp)
-ament_target_dependencies(camera_processing rclcpp sensor_msgs cv_bridge vision_msgs auto_stack_msgs OpenCV)
 
-target_include_directories(camera_processing PUBLIC include ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_ROOT}/include)
+rosidl_generate_interfaces(${PROJECT_NAME}
+                           "msg/DecisionState.msg"
+                           "msg/TrackedObject.msg"
+                           "msg/TrackedObjectArray.msg"
+                           DEPENDENCIES
+                           geometry_msgs
+                           std_msgs
+                           ADD_LINTER_TESTS)
 
-target_link_directories(camera_processing
-  PUBLIC ${OpenCV_LIBRARY_DIRS} ${ONNXRUNTIME_ROOT}/lib)
-
-target_link_libraries(camera_processing
-  ${OpenCV_LIBS}
-  onnxruntime)
-
-install(TARGETS
-  camera_processing
-  DESTINATION lib/${PROJECT_NAME})
-
+ament_export_dependencies(rosidl_default_runtime)
 
 
 if(BUILD_TESTING)

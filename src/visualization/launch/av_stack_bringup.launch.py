@@ -143,5 +143,21 @@ def generate_launch_description() -> LaunchDescription:
                     {"enable_ground_segmentation": True},
                 ],
             ),
+            Node(
+                package='camera_processing',
+                name="camera_processing",
+                executable='camera_processing',
+                remappings=[
+                    ("camera_in", "/p2_img"),
+                    ("object_detections", "object_detections")
+                ],
+                parameters=[
+                    {"processing_rate": 10.0},
+                    {"model_path": "models/yolo/yolov8n.onnx"},
+                    {"publish_overlay_image": True}
+                ],
+            ),
+
+            
         ]
     )

@@ -8,12 +8,9 @@ find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-                           "msg/DecisionState.msg"
                            "msg/ReplayerState.msg"
                            "msg/PlayRequest.msg"
                            "msg/StepRequest.msg"
-                           "msg/TrackedObject.msg"
-                           "msg/TrackedObjectArray.msg"
                            "msg/TriggerResponse.msg"
                            "srv/Play.srv"
                            "srv/Step.srv"
