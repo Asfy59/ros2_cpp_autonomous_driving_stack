@@ -16,9 +16,6 @@ The goal is to build a compact, readable portfolio project that demonstrates:
 
 The project currently has:
 
-- KITTI replay infrastructure from the `ros2_kitti_*` packages
-- URDF/TF and RViz visualization support
-- optional odometry integration from the `ros2_kitti` stack
 - a custom `lidar_processing` node that:
   - subscribes to replayed LiDAR data
   - crops the ROI
@@ -27,9 +24,12 @@ The project currently has:
   - publishes a processed LiDAR point cloud
 - a custom `camera_processing` node that:
   - subscribes to replayed monocular camera data
-  - runs ONNX-based YOLO inference
+  - runs ONNX Runtime-based YOLO inference
   - publishes `vision_msgs/Detection2DArray`
-  - optionally publishes an overlay image for visual debugging
+  - can optionally publish an overlay image for visual debugging
+- KITTI replay infrastructure from the `ros2_kitti_*` packages
+- URDF/TF and RViz visualization support
+- optional odometry integration from the `ros2_kitti` stack
 
 Still in progress:
 
@@ -40,17 +40,6 @@ Still in progress:
 ## Repo Organization
 
 This repo contains two kinds of packages.
-
-## Attribution
-
-This project builds on and integrates the `ros2_kitti_*` replay/visualization stack from:
-
-- `tengfoonglam/kitti_odometry_replayer_ros2`
-- https://github.com/tengfoonglam/kitti_odometry_replayer_ros2
-
-This repository builds on that upstream project for the KITTI replay, URDF/TF, RViz, message, and odometry infrastructure.
-
-![ros2_kitti upstream reference](docs/ros2_kitti.png)
 
 My project-specific work in this repository is focused on the custom processing and fusion layer, including packages such as:
 
@@ -96,13 +85,13 @@ Current custom progress:
 
 The camera-side perception layer is implemented as a custom `camera_processing` package rather than a direct wrapper around an external detector repository.
 
-Current direction:
+Current implementation:
 
-- start with a single camera input, using `p2_img`
-- keep the first version monocular rather than stereo
-- handle image subscription, preprocessing, and camera-side detection in ROS2/C++
+- uses a single monocular camera input, currently `p2_img`
+- keeps the first version monocular rather than stereo
+- handles image subscription, preprocessing, and camera-side detection in ROS2/C++
 - publish `vision_msgs/Detection2DArray` for downstream fusion
-- optionally publish an overlay image with rendered detections for RViz debugging
+- can optionally publish an overlay image with rendered detections for RViz debugging
 
 This keeps the camera stack aligned with the rest of the project:
 
@@ -114,7 +103,9 @@ This keeps the camera stack aligned with the rest of the project:
 
 Current end-to-end flow:
 
-`KITTI replay -> /lidar_pc -> lidar_processing -> /processed_lidar_pc -> RViz`
+`KITTI replay -> /lidar_pc -> lidar_processing -> /processed_lidar_pc`
+
+`KITTI replay -> /p2_img -> camera_processing -> /object_detections`
 
 Planned later flow:
 
@@ -226,7 +217,7 @@ This is the basis for future sensor alignment and fusion.
 Build:
 
 ```bash
-colcon build --packages-select lidar_processing visualization
+colcon build --packages-select auto_stack_msgs lidar_processing camera_processing visualization
 source install/setup.bash
 ```
 
@@ -246,6 +237,17 @@ Current camera topics of interest:
 - `/p2_img`
 - `/object_detections`
 
+## Attribution
+
+This project builds on and integrates the `ros2_kitti_*` replay/visualization stack from:
+
+- `tengfoonglam/kitti_odometry_replayer_ros2`
+- https://github.com/tengfoonglam/kitti_odometry_replayer_ros2
+
+This repository uses that upstream project for the KITTI replay, URDF/TF, RViz, message, and odometry infrastructure.
+
+![ros2_kitti upstream reference](docs/ros2_kitti.png)
+
 ## Development Notes
 
 - I use `ros2_kitti_*` as the base/integration layer
@@ -262,7 +264,7 @@ Current camera topics of interest:
 - [x] Add camera processing node
 - [x] Add ONNX-based 2D camera detections
 - [x] Separate custom stack messages into `auto_stack_msgs`
-- [ ] Add optional camera overlay visualization in RViz2
+- [ ] Add optional camera overlay visualization for RViz2
 - [ ] Benchmark camera and LiDAR runtime stage-by-stage
 - [ ] Decide and document the v1 fusion strategy
 - [ ] Implement fusion and tracking in `fusion_core`
