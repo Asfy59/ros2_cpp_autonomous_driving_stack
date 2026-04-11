@@ -25,10 +25,14 @@ The project currently has:
   - voxelizes the cloud
   - optionally removes the ground plane with RANSAC
   - publishes a processed LiDAR point cloud
+- a custom `camera_processing` node that:
+  - subscribes to replayed monocular camera data
+  - runs ONNX-based YOLO inference
+  - publishes `vision_msgs/Detection2DArray`
+  - optionally publishes an overlay image for visual debugging
 
 Still in progress:
 
-- camera processing
 - fusion/tracking
 - behavior decision output
 - tests/CI beyond the current helper scripts and existing upstream tests
@@ -83,26 +87,27 @@ These are the packages where the project-specific work is being implemented:
 Current custom progress:
 
 - `lidar_processing`: active and working
+- `camera_processing`: active and publishing detections
 - `visualization`: owns app-level bringup launch
 - `fusion_core`: early scaffold
-- `camera_processing`: scaffold only
 - `replay_adapter`: not required yet
 
-## Planned Camera Processing
+## Camera Processing
 
-The camera-side perception layer is planned as a custom `camera_processing` package rather than a direct wrapper around an external detector repository.
+The camera-side perception layer is implemented as a custom `camera_processing` package rather than a direct wrapper around an external detector repository.
 
 Current direction:
 
 - start with a single camera input, using `p2_img`
 - keep the first version monocular rather than stereo
-- handle image subscription, preprocessing, and camera-side candidate extraction in ROS2/C++
-- publish a clean camera-side output that can later be consumed by `fusion_core`
+- handle image subscription, preprocessing, and camera-side detection in ROS2/C++
+- publish `vision_msgs/Detection2DArray` for downstream fusion
+- optionally publish an overlay image with rendered detections for RViz debugging
 
 This keeps the camera stack aligned with the rest of the project:
 
 - `lidar_processing` owns LiDAR-side preprocessing
-- `camera_processing` will own camera-side preprocessing
+- `camera_processing` owns camera-side preprocessing and 2D detections
 - `fusion_core` will own cross-sensor fusion, tracking, and decision logic
 
 ## Current Pipeline
@@ -139,6 +144,8 @@ Dataset reference:
 - TF tree and URDF loading
 - replay controls and RViz integration
 - custom LiDAR preprocessing node
+- custom camera detection node
+- custom stack message package for fused/tracked outputs
 
 ## LiDAR Processing Node
 
@@ -162,6 +169,28 @@ Current configurable parameters:
 These are configured in the app bringup launch:
 
 - [av_stack_bringup.launch.py](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/visualization/launch/av_stack_bringup.launch.py)
+
+## Camera Processing Node
+
+The `camera_processing` node currently performs:
+
+1. latest-message buffering outside the callback
+2. ROS `sensor_msgs/Image` to OpenCV conversion with `cv_bridge`
+3. ONNX Runtime-based YOLO inference
+4. publication of `vision_msgs/Detection2DArray`
+5. optional publication of an overlay image for debugging in RViz2
+
+Current configurable parameters:
+
+- `processing_rate`
+- `model_path`
+- `publish_overlay_image`
+
+Current camera topics of interest:
+
+- `/p2_img`
+- `/object_detections`
+- overlay image topic when enabled
 
 ## LiDAR Processing Visuals
 
@@ -212,6 +241,11 @@ Current LiDAR topics of interest:
 - `/lidar_pc`
 - `/processed_lidar_pc`
 
+Current camera topics of interest:
+
+- `/p2_img`
+- `/object_detections`
+
 ## Development Notes
 
 - I use `ros2_kitti_*` as the base/integration layer
@@ -225,9 +259,16 @@ Current LiDAR topics of interest:
 - [x] Add LiDAR preprocessing parameters in bringup
 - [x] Add a basic LiDAR raw-vs-processed comparison script
 - [x] Capture and document LiDAR preprocessing visuals
-- [ ] Add camera processing node
+- [x] Add camera processing node
+- [x] Add ONNX-based 2D camera detections
+- [x] Separate custom stack messages into `auto_stack_msgs`
+- [ ] Add optional camera overlay visualization in RViz2
+- [ ] Benchmark camera and LiDAR runtime stage-by-stage
+- [ ] Decide and document the v1 fusion strategy
 - [ ] Implement fusion and tracking in `fusion_core`
 - [ ] Publish tracked object outputs
 - [ ] Publish decision output such as `GO`, `SLOW`, `STOP`
+- [ ] Evaluate LiDAR-side clustering/detection vs fusion on current outputs
+- [ ] Fine-tune the YOLO model for autonomous-driving-relevant classes
 - [ ] Improve automated tests
 - [ ] Add CI and polish documentation
