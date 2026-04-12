@@ -1,5 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include "vision_msgs/msg/detection2_d_array.hpp"
@@ -64,7 +69,10 @@ private:
 
     int profiling_interval_frames_;
     bool csv_logging_{false};
-    std::string csv_log_file_path_{"camera_processing_profiling_log.csv"};
+    std::string csv_log_dir_{"csv_logs/camera_processing"};
+    std::string csv_log_file_path_;
+    std::string dataset_sequence_{"unknown"};
+    std::ofstream csv_log_stream_;
 
 public:
     CameraProcessing() : Node("camera_processing")
@@ -73,11 +81,17 @@ public:
         this->declare_parameter<std::string>("model_path", "models/yolo/yolov8n.onnx");
         this->declare_parameter<bool>("publish_overlay_image", false);
         this->declare_parameter<int>("profiling_interval_frames", 60);
+        this->declare_parameter<bool>("enable_csv_logging", false);
+        this->declare_parameter<std::string>("csv_log_dir", "csv_logs/camera_processing");
+        this->declare_parameter<std::string>("dataset_sequence", "unknown");
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("model_path", model_path_);
         this->get_parameter("publish_overlay_image", publish_overlay_image_);
         this->get_parameter("profiling_interval_frames", profiling_interval_frames_);
+        this->get_parameter("enable_csv_logging", csv_logging_);
+        this->get_parameter("csv_log_dir", csv_log_dir_);
+        this->get_parameter("dataset_sequence", dataset_sequence_);
 
         processing_timer_ = this->create_wall_timer(
             processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
@@ -97,6 +111,7 @@ public:
                 "overlay_image",
                 10);
         }
+        initialize_csv_logging();
         RCLCPP_INFO(this->get_logger(), "CameraProcessing node has been initialized.");
     }
 
@@ -283,6 +298,16 @@ public:
             double avg_frame_total_time = interval_sum_frame_total_ms_ / interval_frame_count_;
             double avg_num_detections = interval_sum_num_detections_ / interval_frame_count_;
 
+            write_csv_interval_metrics(
+                interval_frame_count_,
+                avg_buffer_time,
+                avg_conversion_time,
+                avg_inference_time,
+                avg_publish_time,
+                avg_overlay_time,
+                avg_frame_total_time,
+                avg_num_detections);
+
             RCLCPP_INFO(this->get_logger(), "Average Frame processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Inference Time: %.2f ms, Publish Time: %.2f ms, Overlay Time: %.2f ms, Frame Total Time: %.2f ms, Average Number of Detections: %0.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
                         profiling_interval_frames_,
                         avg_buffer_time,
@@ -306,6 +331,106 @@ public:
             interval_sum_frame_total_ms_ = 0.0;
             interval_sum_num_detections_ = 0.0;
         }
+    }
+
+    void initialize_csv_logging()
+    {
+        if (!csv_logging_)
+        {
+            return;
+        }
+
+        try
+        {
+            const std::filesystem::path log_directory(csv_log_dir_);
+            std::filesystem::create_directories(log_directory);
+
+            csv_log_file_path_ = (log_directory / build_csv_filename()).string();
+            csv_log_stream_.open(csv_log_file_path_, std::ios::out | std::ios::trunc);
+            if (!csv_log_stream_.is_open())
+            {
+                RCLCPP_WARN(this->get_logger(), "Failed to open CSV log file at '%s'. Disabling CSV logging.", csv_log_file_path_.c_str());
+                csv_logging_ = false;
+                return;
+            }
+
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_inference_time_ms,avg_publish_time_ms,avg_overlay_time_ms,avg_frame_total_time_ms,avg_num_detections,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_.flush();
+            RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to initialize CSV logging: %s. Disabling CSV logging.", e.what());
+            csv_logging_ = false;
+        }
+    }
+
+    void write_csv_interval_metrics(
+        int interval_frames,
+        double avg_buffer_time,
+        double avg_conversion_time,
+        double avg_inference_time,
+        double avg_publish_time,
+        double avg_overlay_time,
+        double avg_frame_total_time,
+        double avg_num_detections)
+    {
+        if (!csv_logging_ || !csv_log_stream_.is_open())
+        {
+            return;
+        }
+
+        csv_log_stream_ << current_utc_timestamp("%Y-%m-%dT%H:%M:%SZ") << ','
+                        << dataset_sequence_ << ','
+                        << interval_frames << ','
+                        << std::fixed << std::setprecision(2)
+                        << avg_buffer_time << ','
+                        << avg_conversion_time << ','
+                        << avg_inference_time << ','
+                        << avg_publish_time << ','
+                        << avg_overlay_time << ','
+                        << avg_frame_total_time << ','
+                        << avg_num_detections << ','
+                        << total_received_frames_ << ','
+                        << total_processed_frames_ << ','
+                        << total_overwritten_frames_ << '\n';
+        csv_log_stream_.flush();
+    }
+
+    std::string build_csv_filename() const
+    {
+        std::ostringstream filename_builder;
+        filename_builder << this->get_name()
+                         << "_seq_"
+                         << sanitize_for_filename(dataset_sequence_)
+                         << "_"
+                         << current_utc_timestamp("%Y-%m-%dT%H-%M-%S")
+                         << ".csv";
+        return filename_builder.str();
+    }
+
+    std::string current_utc_timestamp(const char *format) const
+    {
+        const auto now = std::chrono::system_clock::now();
+        const auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm utc_time{};
+        gmtime_r(&now_time_t, &utc_time);
+
+        std::ostringstream timestamp_builder;
+        timestamp_builder << std::put_time(&utc_time, format);
+        return timestamp_builder.str();
+    }
+
+    static std::string sanitize_for_filename(std::string value)
+    {
+        for (char &character : value)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(character)) && character != '-' && character != '_')
+            {
+                character = '_';
+            }
+        }
+        return value;
     }
 };
 

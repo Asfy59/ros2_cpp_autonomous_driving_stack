@@ -7,12 +7,14 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description() -> LaunchDescription:
     dataset_path = LaunchConfiguration("dataset_path")
     dataset_number = LaunchConfiguration("dataset_number")
     start_time = LaunchConfiguration("start_time")
     end_time = LaunchConfiguration("end_time")
+    enable_camera_csv_logging = LaunchConfiguration("enable_camera_csv_logging")
     launch_rviz = LaunchConfiguration("launch_rviz")
     enable_point_cloud = LaunchConfiguration("enable_point_cloud")
     enable_gray_images = LaunchConfiguration("enable_gray_images")
@@ -50,6 +52,11 @@ def generate_launch_description() -> LaunchDescription:
                 "end_time",
                 default_value="0.0",
                 description="Replay end time in seconds",
+            ),
+            DeclareLaunchArgument(
+                "enable_camera_csv_logging",
+                default_value="false",
+                description="Enable interval CSV logging for the camera processing node",
             ),
             DeclareLaunchArgument(
                 "launch_rviz",
@@ -154,7 +161,9 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {"processing_rate": 10.0},
                     {"model_path": "models/yolo/yolov8n.onnx"},
-                    {"publish_overlay_image": True}
+                    {"publish_overlay_image": True},
+                    {"enable_csv_logging": enable_camera_csv_logging},
+                    {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
             ),
 
