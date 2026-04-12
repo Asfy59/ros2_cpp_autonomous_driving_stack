@@ -1,5 +1,11 @@
 #include <rclcpp/rclcpp.hpp>
+#include <cctype>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -38,6 +44,9 @@ public:
         this->declare_parameter<std::vector<double>>("voxel_leaf_size", {0.1, 0.1, 0.1});
         this->declare_parameter<bool>("enable_ground_segmentation", true);
         this->declare_parameter<int>("profiling_interval_frames", 60);
+        this->declare_parameter<bool>("enable_csv_logging", false);
+        this->declare_parameter<std::string>("csv_log_dir", "csv_logs/lidar_processing");
+        this->declare_parameter<std::string>("dataset_sequence", "unknown");
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("crop_box_min", crop_box_min_);
@@ -45,6 +54,9 @@ public:
         this->get_parameter("voxel_leaf_size", voxel_leaf_size_);
         this->get_parameter("enable_ground_segmentation", enable_ground_segmentation_);
         this->get_parameter("profiling_interval_frames", profiling_interval_frames_);
+        this->get_parameter("enable_csv_logging", csv_logging_);
+        this->get_parameter("csv_log_dir", csv_log_dir_);
+        this->get_parameter("dataset_sequence", dataset_sequence_);
         
         crop_box_min_vec = Eigen::Vector4f(crop_box_min_[0], crop_box_min_[1], crop_box_min_[2], 1.0);
         crop_box_max_vec = Eigen::Vector4f(crop_box_max_[0], crop_box_max_[1], crop_box_max_[2], 1.0);
@@ -61,6 +73,7 @@ public:
             "lidar_out",
             10);
 
+        initialize_csv_logging();
         RCLCPP_INFO(this->get_logger(), "LidarProcessing node has been initialized.");
 
     }
@@ -277,10 +290,8 @@ private:
             const double avg_input_points = interval_sum_input_points_ / interval_frame_count_;
             const double avg_output_points = interval_sum_output_points_ / interval_frame_count_;
 
-            RCLCPP_INFO(
-                this->get_logger(),
-                "Average point cloud processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Crop Box Time: %.2f ms, Voxelization Time: %.2f ms, Ground Segmentation Time: %.2f ms, Publish Time: %.2f ms, Frame Total Time: %.2f ms, Average Input Points: %.2f, Average Output Points: %.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
-                profiling_interval_frames_,
+            write_csv_interval_metrics(
+                interval_frame_count_,
                 avg_buffer_age_ms,
                 avg_conversion_ms,
                 avg_crop_box_ms,
@@ -289,10 +300,24 @@ private:
                 avg_publish_ms,
                 avg_frame_total_ms,
                 avg_input_points,
-                avg_output_points,
-                total_received_frames_,
-                total_processed_frames_,
-                total_overwritten_frames_);
+                avg_output_points);
+
+            // RCLCPP_INFO(
+            //     this->get_logger(),
+            //     "Average point cloud processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Crop Box Time: %.2f ms, Voxelization Time: %.2f ms, Ground Segmentation Time: %.2f ms, Publish Time: %.2f ms, Frame Total Time: %.2f ms, Average Input Points: %.2f, Average Output Points: %.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
+            //     profiling_interval_frames_,
+            //     avg_buffer_age_ms,
+            //     avg_conversion_ms,
+            //     avg_crop_box_ms,
+            //     avg_voxelization_ms,
+            //     avg_ground_segmentation_ms,
+            //     avg_publish_ms,
+            //     avg_frame_total_ms,
+            //     avg_input_points,
+            //     avg_output_points,
+            //     total_received_frames_,
+            //     total_processed_frames_,
+            //     total_overwritten_frames_);
 
             interval_frame_count_ = 0;
             interval_sum_buffer_age_ms_ = 0.0;
@@ -305,6 +330,110 @@ private:
             interval_sum_input_points_ = 0.0;
             interval_sum_output_points_ = 0.0;
         }
+    }
+
+    void initialize_csv_logging()
+    {
+        if (!csv_logging_)
+        {
+            return;
+        }
+
+        try
+        {
+            const std::filesystem::path log_directory(csv_log_dir_);
+            std::filesystem::create_directories(log_directory);
+
+            csv_log_file_path_ = (log_directory / build_csv_filename()).string();
+            csv_log_stream_.open(csv_log_file_path_, std::ios::out | std::ios::trunc);
+            if (!csv_log_stream_.is_open())
+            {
+                RCLCPP_WARN(this->get_logger(), "Failed to open CSV log file at '%s'. Disabling CSV logging.", csv_log_file_path_.c_str());
+                csv_logging_ = false;
+                return;
+            }
+
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_crop_box_time_ms,avg_voxelization_time_ms,avg_ground_segmentation_time_ms,avg_publish_time_ms,avg_frame_total_time_ms,avg_input_points,avg_output_points,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_.flush();
+            RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to initialize CSV logging: %s. Disabling CSV logging.", e.what());
+            csv_logging_ = false;
+        }
+    }
+
+    void write_csv_interval_metrics(
+        int interval_frames,
+        double avg_buffer_age_ms,
+        double avg_conversion_ms,
+        double avg_crop_box_ms,
+        double avg_voxelization_ms,
+        double avg_ground_segmentation_ms,
+        double avg_publish_ms,
+        double avg_frame_total_ms,
+        double avg_input_points,
+        double avg_output_points)
+    {
+        if (!csv_logging_ || !csv_log_stream_.is_open())
+        {
+            return;
+        }
+
+        csv_log_stream_ << current_utc_timestamp("%Y-%m-%dT%H:%M:%SZ") << ','
+                        << dataset_sequence_ << ','
+                        << interval_frames << ','
+                        << std::fixed << std::setprecision(2)
+                        << avg_buffer_age_ms << ','
+                        << avg_conversion_ms << ','
+                        << avg_crop_box_ms << ','
+                        << avg_voxelization_ms << ','
+                        << avg_ground_segmentation_ms << ','
+                        << avg_publish_ms << ','
+                        << avg_frame_total_ms << ','
+                        << avg_input_points << ','
+                        << avg_output_points << ','
+                        << total_received_frames_ << ','
+                        << total_processed_frames_ << ','
+                        << total_overwritten_frames_ << '\n';
+        csv_log_stream_.flush();
+    }
+
+    std::string build_csv_filename() const
+    {
+        std::ostringstream filename_builder;
+        filename_builder << this->get_name()
+                         << "_seq_"
+                         << sanitize_for_filename(dataset_sequence_)
+                         << "_"
+                         << current_utc_timestamp("%Y-%m-%dT%H-%M-%S")
+                         << ".csv";
+        return filename_builder.str();
+    }
+
+    std::string current_utc_timestamp(const char *format) const
+    {
+        const auto now = std::chrono::system_clock::now();
+        const auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm utc_time{};
+        gmtime_r(&now_time_t, &utc_time);
+
+        std::ostringstream timestamp_builder;
+        timestamp_builder << std::put_time(&utc_time, format);
+        return timestamp_builder.str();
+    }
+
+    static std::string sanitize_for_filename(std::string value)
+    {
+        for (char &character : value)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(character)) && character != '-' && character != '_')
+            {
+                character = '_';
+            }
+        }
+        return value;
     }
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_subscription_;
@@ -336,6 +465,11 @@ private:
     std::uint64_t total_processed_frames_{0};
     std::uint64_t total_overwritten_frames_{0};
     int profiling_interval_frames_;
+    bool csv_logging_{false};
+    std::string csv_log_dir_{"csv_logs/lidar_processing"};
+    std::string csv_log_file_path_;
+    std::string dataset_sequence_{"unknown"};
+    std::ofstream csv_log_stream_;
 };
 
 int main(int argc, char *argv[])
