@@ -30,7 +30,14 @@ The project currently has:
   - subscribes to replayed monocular camera data
   - runs ONNX Runtime-based YOLO inference
   - publishes `vision_msgs/Detection2DArray`
+  - can optionally publish `sensor_msgs/CameraInfo` derived from KITTI calibration
   - can optionally publish an overlay image for visual debugging
+  - supports interval-based runtime metrics and CSV logging
+- a custom `fusion_core` node that:
+  - subscribes to LiDAR 3D detections, camera 2D detections, and camera calibration
+  - projects LiDAR 3D boxes into the `p2` image plane using TF + camera intrinsics
+  - associates 3D LiDAR proposals with 2D camera detections
+  - publishes first-pass `TrackedObjectArray` and `DecisionState` outputs
   - supports interval-based runtime metrics and CSV logging
 - KITTI replay infrastructure from the `ros2_kitti_*` packages
 - URDF/TF and RViz visualization support
@@ -38,8 +45,8 @@ The project currently has:
 
 Still in progress:
 
-- fusion/tracking
-- object-level fused outputs
+- persistent tracking / velocity estimation
+- deeper fusion evaluation and optimization
 - tests/CI beyond the current helper scripts and existing upstream tests
 
 Current project focus:
@@ -100,7 +107,7 @@ Current custom progress:
 - `lidar_processing`: active and working
 - `camera_processing`: active and publishing detections
 - `visualization`: owns app-level bringup launch
-- `fusion_core`: early scaffold
+- `fusion_core`: first-pass fusion and decision outputs implemented
 - `replay_adapter`: not required yet
 
 ## Camera Processing
@@ -133,7 +140,9 @@ Current end-to-end flow:
 
 `KITTI replay -> /lidar_pc -> lidar_processing -> /lidar_detections + /lidar_detection_markers + optional /processed_lidar_pc`
 
-`KITTI replay -> /p2_img -> camera_processing -> /object_detections + optional /overlay_image`
+`KITTI replay -> /p2_img -> camera_processing -> /object_detections + optional /p2_camera_info + optional /overlay_image`
+
+`/lidar_detections + /object_detections + /p2_camera_info -> fusion_core -> /tracked_objects + /decision_state`
 
 Planned later flow:
 
@@ -281,21 +290,53 @@ In the current replay stack:
 
 This is the basis for future sensor alignment and fusion.
 
+## Fusion Core Node
+
+The current `fusion_core` node is a first-pass fusion stage built on top of the processed outputs from the LiDAR and camera nodes.
+
+Current implementation:
+
+1. subscribes to `vision_msgs/Detection3DArray` from `lidar_processing`
+2. buffers recent camera `vision_msgs/Detection2DArray` messages
+3. subscribes to `sensor_msgs/CameraInfo` from `camera_processing`
+4. uses LiDAR detections as the frame trigger for fusion
+5. projects each 3D LiDAR box into the `p2` image using TF + camera intrinsics
+6. associates projected 2D ROIs against camera detections using IoU and center-distance gating
+7. publishes `auto_stack_msgs/TrackedObjectArray` on `/tracked_objects`
+8. publishes `auto_stack_msgs/DecisionState` on `/decision_state`
+9. supports interval-based runtime profiling and optional CSV export
+
+Current fusion topics of interest:
+
+- `/lidar_detections`
+- `/object_detections`
+- `/p2_camera_info`
+- `/tracked_objects`
+- `/decision_state`
+
+Current first-pass design choices:
+
+- LiDAR remains the source of 3D geometry
+- camera provides semantic class enrichment when the association is clean
+- track IDs are currently frame-local rather than persistent
+- decision logic is intentionally simple and based on the nearest forward LiDAR-backed obstacle
+
 ## Runtime Profiling
 
-Both perception nodes now support interval-based profiling aimed at measuring real pipeline cost rather than just one-off debug timings.
+All three custom processing nodes now support interval-based profiling aimed at measuring real pipeline cost rather than just one-off debug timings.
 
 Current profiling coverage:
 
 - `camera_processing`: buffer age, conversion, inference, publish, overlay, frame total, average detections
 - `lidar_processing`: buffer age, conversion, crop box, voxelization, ground segmentation, clustering, cluster filtering, bounding box estimation, detection conversion, marker conversion, publish stages, frame total, input/output point counts, cluster counts, detection counts
+- `fusion_core`: buffer age, TF lookup, 3D box projection, association, decision, publish, frame total, camera-LiDAR skew, accepted match IoU, input detection counts, matched/unmatched counts, output tracked-object count
 
 CSV logging behavior:
 
 - disabled by default
 - one CSV file per node run
 - one row written per `profiling_interval_frames`
-- logs stored under `csv_logs/camera_processing/` and `csv_logs/lidar_processing/`
+- logs stored under `csv_logs/camera_processing/`, `csv_logs/lidar_processing/`, and `csv_logs/fusion_core/`
 - file names include the node name, KITTI sequence, and UTC timestamp
 
 The profiling work is intended to support later optimization of:
@@ -308,7 +349,7 @@ The profiling work is intended to support later optimization of:
 Build:
 
 ```bash
-colcon build --packages-select auto_stack_msgs lidar_processing camera_processing visualization
+colcon build --packages-select auto_stack_msgs lidar_processing camera_processing fusion_core visualization
 source install/setup.bash
 ```
 
@@ -325,7 +366,8 @@ ros2 launch visualization av_stack_bringup.launch.py \
   dataset_path:=/path/to/kitti_dataset \
   dataset_number:=0 \
   enable_camera_csv_logging:=true \
-  enable_lidar_csv_logging:=true
+  enable_lidar_csv_logging:=true \
+  enable_fusion_csv_logging:=true
 ```
 
 Current LiDAR topics of interest:
@@ -340,6 +382,11 @@ Current camera topics of interest:
 - `/p2_img`
 - `/object_detections`
 - `/p2_camera_info` when enabled
+
+Current fusion topics of interest:
+
+- `/tracked_objects`
+- `/decision_state`
 
 ## Attribution
 
@@ -372,11 +419,13 @@ This repository uses that upstream project for the KITTI replay, URDF/TF, RViz, 
 - [x] Add interval runtime profiling for camera and LiDAR
 - [x] Add CSV export for camera and LiDAR profiling
 - [x] Separate custom stack messages into `auto_stack_msgs`
-- [ ] Decide and document the v1 fusion strategy
-- [ ] Implement fusion and tracking in `fusion_core`
-- [ ] Publish tracked object outputs
+- [x] Decide and implement the v1 first-pass fusion direction
+- [x] Implement first-pass `fusion_core`
+- [x] Publish tracked object and decision outputs
+- [x] Add interval runtime profiling for `fusion_core`
 - [ ] Evaluate LiDAR-side clustering/detection vs fusion on current outputs
 - [ ] Optimize the perception and fusion pipeline using the profiling data
+- [ ] Add shared CPU / memory / rate metrics across all custom nodes
 - [ ] Fine-tune the YOLO model for autonomous-driving-relevant classes
 - [ ] Improve automated tests
 - [ ] Add CI and polish documentation
