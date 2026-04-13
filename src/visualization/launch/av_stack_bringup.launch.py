@@ -146,14 +146,22 @@ def generate_launch_description() -> LaunchDescription:
                 executable='lidar_processing',
                 remappings=[
                     ("lidar_in", "lidar_pc"),
-                    ("lidar_out", "processed_lidar_pc")
+                    ("lidar_out", "processed_lidar_pc"),
+                    ("lidar_detections", "lidar_detections"),
+                    ("lidar_detection_markers", "lidar_detection_markers")
                 ],
                 parameters=[
                     {"processing_rate": 10.0},
                     {"crop_box_min": [-10.0, -20.0, -2.0]},
                     {"crop_box_max": [30.0, 20.0, 2.0]},
                     {"voxel_leaf_size": [0.1, 0.1, 0.1]},
+                    {"publish_processed_lidar_pc": True},
                     {"enable_ground_segmentation": True},
+                    {"cluster_tolerance_m": 0.75},
+                    {"min_cluster_points": 5},
+                    {"max_cluster_points": 5000},
+                    {"min_cluster_size": [0.2, 0.2, 0.2]},
+                    {"max_cluster_size": [15.0, 8.0, 5.0]},
                     {"enable_csv_logging": enable_lidar_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],

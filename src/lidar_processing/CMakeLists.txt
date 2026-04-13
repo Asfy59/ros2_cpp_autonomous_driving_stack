@@ -12,15 +12,21 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common filters kdtree segmentation)
 find_package(rclcpp REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(vision_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
 add_executable(lidar_processing src/lidar_processing.cpp)
-ament_target_dependencies(lidar_processing rclcpp pcl_conversions sensor_msgs)
+ament_target_dependencies(lidar_processing rclcpp pcl_conversions sensor_msgs vision_msgs visualization_msgs)
+target_include_directories(lidar_processing PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(lidar_processing ${PCL_LIBRARIES})
+add_definitions(${PCL_DEFINITIONS})
 
 
 install(TARGETS
