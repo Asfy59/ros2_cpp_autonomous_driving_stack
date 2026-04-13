@@ -308,18 +308,18 @@ public:
                 avg_frame_total_time,
                 avg_num_detections);
 
-            RCLCPP_INFO(this->get_logger(), "Average Frame processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Inference Time: %.2f ms, Publish Time: %.2f ms, Overlay Time: %.2f ms, Frame Total Time: %.2f ms, Average Number of Detections: %0.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
-                        profiling_interval_frames_,
-                        avg_buffer_time,
-                        avg_conversion_time,
-                        avg_inference_time,
-                        avg_publish_time,
-                        avg_overlay_time,
-                        avg_frame_total_time,
-                        avg_num_detections,
-                        total_received_frames_,
-                        total_processed_frames_,
-                        total_overwritten_frames_);
+            // RCLCPP_INFO(this->get_logger(), "Average Frame processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Inference Time: %.2f ms, Publish Time: %.2f ms, Overlay Time: %.2f ms, Frame Total Time: %.2f ms, Average Number of Detections: %0.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
+            //             profiling_interval_frames_,
+            //             avg_buffer_time,
+            //             avg_conversion_time,
+            //             avg_inference_time,
+            //             avg_publish_time,
+            //             avg_overlay_time,
+            //             avg_frame_total_time,
+            //             avg_num_detections,
+            //             total_received_frames_,
+            //             total_processed_frames_,
+            //             total_overwritten_frames_);
 
             // Reset the counters for the next interval
             interval_frame_count_ = 0;

@@ -388,6 +388,18 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        lidar_detection_boxes: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /lidar_detection_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -444,15 +456,15 @@ Visualization Manager:
         X: 0.7152009606361389
         Y: 0.02102666161954403
         Z: 0.11444433033466339
-      Focal Shape Fixed Size: false
+      Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -1.399796485900879
+      Pitch: -1.149796724319458
       Target Frame: ground_truth/vehicle
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.6735663414001465
+      Yaw: -1.5946180820465088
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 106.79824829101562

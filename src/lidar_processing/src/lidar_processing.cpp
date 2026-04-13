@@ -515,14 +515,13 @@ public:
         visualization_msgs::msg::MarkerArray marker_array;
         marker_array.markers.reserve(cluster_boxes.size());
 
-        const double marker_lifetime_seconds = processing_rate_ > 0.0 ? (2.0 / processing_rate_) : 0.2;
-
         for (std::size_t cluster_index = 0; cluster_index < cluster_boxes.size(); ++cluster_index)
         {
             const auto &cluster_box = cluster_boxes[cluster_index];
 
             visualization_msgs::msg::Marker marker;
             marker.header = header;
+            marker.header.stamp = rclcpp::Time(0);
             marker.ns = "lidar_detection_boxes";
             marker.id = static_cast<int>(cluster_index);
             marker.type = visualization_msgs::msg::Marker::CUBE;
@@ -541,7 +540,7 @@ public:
             marker.color.g = 1.0f;
             marker.color.b = 0.0f;
             marker.color.a = 0.25f;
-            marker.lifetime = rclcpp::Duration::from_seconds(marker_lifetime_seconds);
+            marker.lifetime = rclcpp::Duration::from_seconds(0.0);
             marker.frame_locked = false;
             marker_array.markers.push_back(marker);
         }
