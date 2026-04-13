@@ -2,13 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +30,25 @@
 #include <tf2_ros/transform_listener.h>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <vision_msgs/msg/detection3_d_array.hpp>
+
+struct ScopedTimer
+{
+    std::chrono::steady_clock::time_point start_time_;
+    double &duration_ms_;
+
+    explicit ScopedTimer(double &duration_ms) : duration_ms_(duration_ms)
+    {
+        start_time_ = std::chrono::steady_clock::now();
+    }
+
+    ~ScopedTimer()
+    {
+        const auto end_time = std::chrono::steady_clock::now();
+        duration_ms_ = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                           end_time - start_time_)
+                           .count();
+    }
+};
 
 class FusionCore : public rclcpp::Node
 {
@@ -47,6 +72,10 @@ public:
         this->declare_parameter<double>("slow_distance_m", 12.0);
         this->declare_parameter<double>("decision_lateral_gate_m", 2.5);
         this->declare_parameter<int>("camera_history_size", 10);
+        this->declare_parameter<int>("profiling_interval_frames", 60);
+        this->declare_parameter<bool>("enable_csv_logging", false);
+        this->declare_parameter<std::string>("csv_log_dir", "csv_logs/fusion_core");
+        this->declare_parameter<std::string>("dataset_sequence", "unknown");
 
         const auto lidar_detections_topic = this->get_parameter("lidar_detections_topic").as_string();
         const auto camera_detections_topic = this->get_parameter("camera_detections_topic").as_string();
@@ -63,6 +92,10 @@ public:
         slow_distance_m_ = this->get_parameter("slow_distance_m").as_double();
         decision_lateral_gate_m_ = this->get_parameter("decision_lateral_gate_m").as_double();
         camera_history_size_ = std::max(1, static_cast<int>(this->get_parameter("camera_history_size").as_int()));
+        profiling_interval_frames_ = static_cast<int>(this->get_parameter("profiling_interval_frames").as_int());
+        csv_logging_ = this->get_parameter("enable_csv_logging").as_bool();
+        csv_log_dir_ = this->get_parameter("csv_log_dir").as_string();
+        dataset_sequence_ = this->get_parameter("dataset_sequence").as_string();
 
         // Keep the camera side buffered so LiDAR can drive the frame-level fusion pass.
         camera_detections_subscription_ = this->create_subscription<vision_msgs::msg::Detection2DArray>(
@@ -85,10 +118,30 @@ public:
         decision_state_publisher_ =
             this->create_publisher<auto_stack_msgs::msg::DecisionState>(decision_state_topic, 10);
 
+        initialize_csv_logging();
         RCLCPP_INFO(this->get_logger(), "FusionCore node has been initialized.");
     }
 
 private:
+    struct FusionProcessingMetrics
+    {
+        double buffer_age_ms{0.0};
+        double tf_lookup_time_ms{0.0};
+        double projection_time_ms{0.0};
+        double association_time_ms{0.0};
+        double decision_time_ms{0.0};
+        double publish_time_ms{0.0};
+        double frame_total_time_ms{0.0};
+        double camera_lidar_skew_ms{0.0};
+        double accepted_match_iou{0.0};
+        std::size_t input_lidar_detections{0};
+        std::size_t input_camera_detections{0};
+        std::size_t matched_detections{0};
+        std::size_t unmatched_lidar_detections{0};
+        std::size_t unmatched_camera_detections{0};
+        std::size_t output_tracked_objects{0};
+    };
+
     struct ImageRoi
     {
         double min_x{0.0};
@@ -125,6 +178,12 @@ private:
         std::string class_id{"unknown"};
     };
 
+    struct CameraFrameSelection
+    {
+        std::shared_ptr<vision_msgs::msg::Detection2DArray> detections;
+        double skew_ms{0.0};
+    };
+
     void camera_detections_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg)
     {
         if (!msg)
@@ -158,11 +217,28 @@ private:
             return;
         }
 
-        auto tracked_objects_msg = build_tracked_objects(*msg);
-        auto decision_state_msg = build_decision_state(tracked_objects_msg);
+        FusionProcessingMetrics metrics;
+        total_received_frames_++;
 
-        tracked_objects_publisher_->publish(tracked_objects_msg);
-        decision_state_publisher_->publish(decision_state_msg);
+        auto tracked_objects_msg = auto_stack_msgs::msg::TrackedObjectArray();
+        auto decision_state_msg = auto_stack_msgs::msg::DecisionState();
+        {
+            ScopedTimer total_frame_timer(metrics.frame_total_time_ms);
+            tracked_objects_msg = build_tracked_objects(*msg, metrics);
+            {
+                ScopedTimer decision_timer(metrics.decision_time_ms);
+                decision_state_msg = build_decision_state(tracked_objects_msg);
+            }
+            {
+                ScopedTimer publish_timer(metrics.publish_time_ms);
+                tracked_objects_publisher_->publish(tracked_objects_msg);
+                decision_state_publisher_->publish(decision_state_msg);
+            }
+        }
+
+        metrics.output_tracked_objects = tracked_objects_msg.objects.size();
+        total_processed_frames_++;
+        update_profiling_metrics(metrics);
 
         RCLCPP_DEBUG(
             this->get_logger(),
@@ -172,19 +248,29 @@ private:
     }
 
     auto_stack_msgs::msg::TrackedObjectArray build_tracked_objects(
-        const vision_msgs::msg::Detection3DArray &lidar_detections)
+        const vision_msgs::msg::Detection3DArray &lidar_detections,
+        FusionProcessingMetrics &metrics)
     {
         auto_stack_msgs::msg::TrackedObjectArray tracked_objects_msg;
         tracked_objects_msg.header = lidar_detections.header;
         tracked_objects_msg.objects.reserve(lidar_detections.detections.size());
+        metrics.input_lidar_detections = lidar_detections.detections.size();
 
-        auto camera_detections = find_nearest_camera_detections(lidar_detections.header.stamp);
+        const auto camera_selection = find_nearest_camera_detections(lidar_detections.header.stamp);
+        auto camera_detections = camera_selection.detections;
         auto camera_info = get_latest_camera_info();
+        metrics.camera_lidar_skew_ms = camera_selection.skew_ms;
         std::vector<bool> camera_detection_used;
         if (camera_detections)
         {
             camera_detection_used.assign(camera_detections->detections.size(), false);
+            metrics.input_camera_detections = camera_detections->detections.size();
         }
+
+        double accumulated_tf_lookup_time_ms = 0.0;
+        double accumulated_projection_time_ms = 0.0;
+        double accumulated_association_time_ms = 0.0;
+        double accumulated_match_iou = 0.0;
 
         for (std::size_t lidar_index = 0; lidar_index < lidar_detections.detections.size(); ++lidar_index)
         {
@@ -193,13 +279,24 @@ private:
 
             if (camera_detections && camera_info)
             {
-                const auto projected_roi = project_lidar_box_to_image(lidar_detection, *camera_info);
+                double tf_lookup_time_ms = 0.0;
+                double projection_time_ms = 0.0;
+                const auto projected_roi =
+                    project_lidar_box_to_image(lidar_detection, *camera_info, tf_lookup_time_ms, projection_time_ms);
+                accumulated_tf_lookup_time_ms += tf_lookup_time_ms;
+                accumulated_projection_time_ms += projection_time_ms;
                 if (projected_roi)
                 {
-                    const auto match = find_best_camera_match(
-                        *projected_roi,
-                        *camera_detections,
-                        camera_detection_used);
+                    std::optional<CameraMatch> match;
+                    {
+                        double association_time_ms = 0.0;
+                        ScopedTimer association_timer(association_time_ms);
+                        match = find_best_camera_match(
+                            *projected_roi,
+                            *camera_detections,
+                            camera_detection_used);
+                        accumulated_association_time_ms += association_time_ms;
+                    }
 
                     if (match)
                     {
@@ -208,11 +305,23 @@ private:
                             static_cast<float>(std::clamp(0.50 + 0.50 * match->score, 0.0, 1.0));
                         tracked_object.from_camera = true;
                         camera_detection_used[match->detection_index] = true;
+                        accumulated_match_iou += match->iou;
+                        metrics.matched_detections++;
                     }
                 }
             }
 
             tracked_objects_msg.objects.push_back(tracked_object);
+        }
+
+        metrics.tf_lookup_time_ms = accumulated_tf_lookup_time_ms;
+        metrics.projection_time_ms = accumulated_projection_time_ms;
+        metrics.association_time_ms = accumulated_association_time_ms;
+        metrics.unmatched_lidar_detections = metrics.input_lidar_detections - metrics.matched_detections;
+        metrics.unmatched_camera_detections = metrics.input_camera_detections - metrics.matched_detections;
+        if (metrics.matched_detections > 0U)
+        {
+            metrics.accepted_match_iou = accumulated_match_iou / static_cast<double>(metrics.matched_detections);
         }
 
         return tracked_objects_msg;
@@ -241,13 +350,14 @@ private:
         return tracked_object;
     }
 
-    std::shared_ptr<vision_msgs::msg::Detection2DArray> find_nearest_camera_detections(
+    CameraFrameSelection find_nearest_camera_detections(
         const builtin_interfaces::msg::Time &target_stamp)
     {
+        CameraFrameSelection selection;
         std::lock_guard<std::mutex> lock(camera_mutex_);
         if (camera_detections_buffer_.empty())
         {
-            return nullptr;
+            return selection;
         }
 
         auto best_match = camera_detections_buffer_.front();
@@ -265,10 +375,12 @@ private:
 
         if (best_delta_ms > camera_sync_tolerance_ms_)
         {
-            return nullptr;
+            return selection;
         }
 
-        return best_match;
+        selection.detections = best_match;
+        selection.skew_ms = best_delta_ms;
+        return selection;
     }
 
     std::shared_ptr<sensor_msgs::msg::CameraInfo> get_latest_camera_info()
@@ -279,7 +391,9 @@ private:
 
     std::optional<ImageRoi> project_lidar_box_to_image(
         const vision_msgs::msg::Detection3D &lidar_detection,
-        const sensor_msgs::msg::CameraInfo &camera_info)
+        const sensor_msgs::msg::CameraInfo &camera_info,
+        double &tf_lookup_time_ms,
+        double &projection_time_ms)
     {
         if (camera_info.header.frame_id.empty() || camera_info.width == 0U || camera_info.height == 0U)
         {
@@ -287,76 +401,82 @@ private:
         }
 
         geometry_msgs::msg::TransformStamped lidar_to_camera;
-        try
         {
-            lidar_to_camera = tf_buffer_.lookupTransform(
-                camera_info.header.frame_id,
-                lidar_detection.header.frame_id,
-                lidar_detection.header.stamp,
-                rclcpp::Duration::from_seconds(tf_lookup_timeout_ms_ / 1000.0));
-        }
-        catch (const tf2::TransformException &exception)
-        {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                2000,
-                "TF lookup failed while projecting lidar boxes: %s",
-                exception.what());
-            return std::nullopt;
+            try
+            {
+                ScopedTimer tf_lookup_timer(tf_lookup_time_ms);
+                lidar_to_camera = tf_buffer_.lookupTransform(
+                    camera_info.header.frame_id,
+                    lidar_detection.header.frame_id,
+                    lidar_detection.header.stamp,
+                    rclcpp::Duration::from_seconds(tf_lookup_timeout_ms_ / 1000.0));
+            }
+            catch (const tf2::TransformException &exception)
+            {
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    2000,
+                    "TF lookup failed while projecting lidar boxes: %s",
+                    exception.what());
+                return std::nullopt;
+            }
         }
 
         tf2::Transform lidar_to_camera_tf;
         tf2::fromMsg(lidar_to_camera.transform, lidar_to_camera_tf);
 
-        const auto corners = build_box_corners(lidar_detection);
-        double min_u = std::numeric_limits<double>::max();
-        double min_v = std::numeric_limits<double>::max();
-        double max_u = std::numeric_limits<double>::lowest();
-        double max_v = std::numeric_limits<double>::lowest();
-        std::size_t valid_corner_count = 0;
-
-        for (const auto &corner : corners)
         {
-            const auto camera_point = lidar_to_camera_tf * corner;
-            if (camera_point.z() <= min_projection_depth_m_)
+            ScopedTimer projection_timer(projection_time_ms);
+            const auto corners = build_box_corners(lidar_detection);
+            double min_u = std::numeric_limits<double>::max();
+            double min_v = std::numeric_limits<double>::max();
+            double max_u = std::numeric_limits<double>::lowest();
+            double max_v = std::numeric_limits<double>::lowest();
+            std::size_t valid_corner_count = 0;
+
+            for (const auto &corner : corners)
             {
-                continue;
+                const auto camera_point = lidar_to_camera_tf * corner;
+                if (camera_point.z() <= min_projection_depth_m_)
+                {
+                    continue;
+                }
+
+                const auto projected = project_camera_point(camera_point, camera_info);
+                if (!projected)
+                {
+                    continue;
+                }
+
+                min_u = std::min(min_u, projected->first);
+                min_v = std::min(min_v, projected->second);
+                max_u = std::max(max_u, projected->first);
+                max_v = std::max(max_v, projected->second);
+                ++valid_corner_count;
             }
 
-            const auto projected = project_camera_point(camera_point, camera_info);
-            if (!projected)
+            if (valid_corner_count < 2)
             {
-                continue;
+                return std::nullopt;
             }
 
-            min_u = std::min(min_u, projected->first);
-            min_v = std::min(min_v, projected->second);
-            max_u = std::max(max_u, projected->first);
-            max_v = std::max(max_v, projected->second);
-            ++valid_corner_count;
+            const double image_max_x = static_cast<double>(camera_info.width - 1U);
+            const double image_max_y = static_cast<double>(camera_info.height - 1U);
+
+            ImageRoi roi;
+            roi.min_x = std::clamp(min_u, 0.0, image_max_x);
+            roi.min_y = std::clamp(min_v, 0.0, image_max_y);
+            roi.max_x = std::clamp(max_u, 0.0, image_max_x);
+            roi.max_y = std::clamp(max_v, 0.0, image_max_y);
+
+            if (roi.width() < 1.0 || roi.height() < 1.0)
+            {
+                return std::nullopt;
+            }
+
+            return roi;
         }
-
-        if (valid_corner_count < 2)
-        {
-            return std::nullopt;
-        }
-
-        const double image_max_x = static_cast<double>(camera_info.width - 1U);
-        const double image_max_y = static_cast<double>(camera_info.height - 1U);
-
-        ImageRoi roi;
-        roi.min_x = std::clamp(min_u, 0.0, image_max_x);
-        roi.min_y = std::clamp(min_v, 0.0, image_max_y);
-        roi.max_x = std::clamp(max_u, 0.0, image_max_x);
-        roi.max_y = std::clamp(max_v, 0.0, image_max_y);
-
-        if (roi.width() < 1.0 || roi.height() < 1.0)
-        {
-            return std::nullopt;
-        }
-
-        return roi;
     }
 
     std::optional<CameraMatch> find_best_camera_match(
@@ -589,6 +709,180 @@ private:
         return "class_" + class_id;
     }
 
+    void update_profiling_metrics(const FusionProcessingMetrics &metrics)
+    {
+        interval_sum_buffer_age_ms_ += metrics.buffer_age_ms;
+        interval_sum_tf_lookup_ms_ += metrics.tf_lookup_time_ms;
+        interval_sum_projection_ms_ += metrics.projection_time_ms;
+        interval_sum_association_ms_ += metrics.association_time_ms;
+        interval_sum_decision_ms_ += metrics.decision_time_ms;
+        interval_sum_publish_ms_ += metrics.publish_time_ms;
+        interval_sum_frame_total_ms_ += metrics.frame_total_time_ms;
+        interval_sum_camera_lidar_skew_ms_ += metrics.camera_lidar_skew_ms;
+        interval_sum_accepted_match_iou_ += metrics.accepted_match_iou;
+        interval_sum_input_lidar_detections_ += metrics.input_lidar_detections;
+        interval_sum_input_camera_detections_ += metrics.input_camera_detections;
+        interval_sum_matched_detections_ += metrics.matched_detections;
+        interval_sum_unmatched_lidar_detections_ += metrics.unmatched_lidar_detections;
+        interval_sum_unmatched_camera_detections_ += metrics.unmatched_camera_detections;
+        interval_sum_output_tracked_objects_ += metrics.output_tracked_objects;
+        interval_frame_count_++;
+
+        if (interval_frame_count_ >= profiling_interval_frames_)
+        {
+            write_csv_interval_metrics(
+                interval_frame_count_,
+                interval_sum_buffer_age_ms_ / interval_frame_count_,
+                interval_sum_tf_lookup_ms_ / interval_frame_count_,
+                interval_sum_projection_ms_ / interval_frame_count_,
+                interval_sum_association_ms_ / interval_frame_count_,
+                interval_sum_decision_ms_ / interval_frame_count_,
+                interval_sum_publish_ms_ / interval_frame_count_,
+                interval_sum_frame_total_ms_ / interval_frame_count_,
+                interval_sum_camera_lidar_skew_ms_ / interval_frame_count_,
+                interval_sum_accepted_match_iou_ / interval_frame_count_,
+                interval_sum_input_lidar_detections_ / interval_frame_count_,
+                interval_sum_input_camera_detections_ / interval_frame_count_,
+                interval_sum_matched_detections_ / interval_frame_count_,
+                interval_sum_unmatched_lidar_detections_ / interval_frame_count_,
+                interval_sum_unmatched_camera_detections_ / interval_frame_count_,
+                interval_sum_output_tracked_objects_ / interval_frame_count_);
+
+            interval_frame_count_ = 0;
+            interval_sum_buffer_age_ms_ = 0.0;
+            interval_sum_tf_lookup_ms_ = 0.0;
+            interval_sum_projection_ms_ = 0.0;
+            interval_sum_association_ms_ = 0.0;
+            interval_sum_decision_ms_ = 0.0;
+            interval_sum_publish_ms_ = 0.0;
+            interval_sum_frame_total_ms_ = 0.0;
+            interval_sum_camera_lidar_skew_ms_ = 0.0;
+            interval_sum_accepted_match_iou_ = 0.0;
+            interval_sum_input_lidar_detections_ = 0.0;
+            interval_sum_input_camera_detections_ = 0.0;
+            interval_sum_matched_detections_ = 0.0;
+            interval_sum_unmatched_lidar_detections_ = 0.0;
+            interval_sum_unmatched_camera_detections_ = 0.0;
+            interval_sum_output_tracked_objects_ = 0.0;
+        }
+    }
+
+    void initialize_csv_logging()
+    {
+        if (!csv_logging_)
+        {
+            return;
+        }
+
+        try
+        {
+            const std::filesystem::path log_directory(csv_log_dir_);
+            std::filesystem::create_directories(log_directory);
+
+            csv_log_file_path_ = (log_directory / build_csv_filename()).string();
+            csv_log_stream_.open(csv_log_file_path_, std::ios::out | std::ios::trunc);
+            if (!csv_log_stream_.is_open())
+            {
+                RCLCPP_WARN(this->get_logger(), "Failed to open CSV log file at '%s'. Disabling CSV logging.", csv_log_file_path_.c_str());
+                csv_logging_ = false;
+                return;
+            }
+
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_tf_lookup_time_ms,avg_projection_time_ms,avg_association_time_ms,avg_decision_time_ms,avg_publish_time_ms,avg_frame_total_time_ms,avg_camera_lidar_skew_ms,avg_accepted_match_iou,avg_input_lidar_detections,avg_input_camera_detections,avg_matched_detections,avg_unmatched_lidar_detections,avg_unmatched_camera_detections,avg_output_tracked_objects,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_.flush();
+            RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to initialize CSV logging: %s. Disabling CSV logging.", e.what());
+            csv_logging_ = false;
+        }
+    }
+
+    void write_csv_interval_metrics(
+        int interval_frames,
+        double avg_buffer_age_ms,
+        double avg_tf_lookup_ms,
+        double avg_projection_ms,
+        double avg_association_ms,
+        double avg_decision_ms,
+        double avg_publish_ms,
+        double avg_frame_total_ms,
+        double avg_camera_lidar_skew_ms,
+        double avg_accepted_match_iou,
+        double avg_input_lidar_detections,
+        double avg_input_camera_detections,
+        double avg_matched_detections,
+        double avg_unmatched_lidar_detections,
+        double avg_unmatched_camera_detections,
+        double avg_output_tracked_objects)
+    {
+        if (!csv_logging_ || !csv_log_stream_.is_open())
+        {
+            return;
+        }
+
+        csv_log_stream_ << current_utc_timestamp("%Y-%m-%dT%H:%M:%SZ") << ','
+                        << dataset_sequence_ << ','
+                        << interval_frames << ','
+                        << std::fixed << std::setprecision(2)
+                        << avg_buffer_age_ms << ','
+                        << avg_tf_lookup_ms << ','
+                        << avg_projection_ms << ','
+                        << avg_association_ms << ','
+                        << avg_decision_ms << ','
+                        << avg_publish_ms << ','
+                        << avg_frame_total_ms << ','
+                        << avg_camera_lidar_skew_ms << ','
+                        << avg_accepted_match_iou << ','
+                        << avg_input_lidar_detections << ','
+                        << avg_input_camera_detections << ','
+                        << avg_matched_detections << ','
+                        << avg_unmatched_lidar_detections << ','
+                        << avg_unmatched_camera_detections << ','
+                        << avg_output_tracked_objects << ','
+                        << total_received_frames_ << ','
+                        << total_processed_frames_ << ','
+                        << total_overwritten_frames_ << '\n';
+        csv_log_stream_.flush();
+    }
+
+    std::string build_csv_filename() const
+    {
+        std::ostringstream filename_builder;
+        filename_builder << this->get_name()
+                         << "_seq_"
+                         << sanitize_for_filename(dataset_sequence_)
+                         << "_"
+                         << current_utc_timestamp("%Y-%m-%dT%H-%M-%S")
+                         << ".csv";
+        return filename_builder.str();
+    }
+
+    std::string current_utc_timestamp(const char *format) const
+    {
+        const auto now = std::chrono::system_clock::now();
+        const auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm utc_time{};
+        gmtime_r(&now_time_t, &utc_time);
+
+        std::ostringstream timestamp_builder;
+        timestamp_builder << std::put_time(&utc_time, format);
+        return timestamp_builder.str();
+    }
+
+    static std::string sanitize_for_filename(std::string value)
+    {
+        for (char &character : value)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(character)) && character != '-' && character != '_')
+            {
+                character = '_';
+            }
+        }
+        return value;
+    }
+
     rclcpp::Subscription<vision_msgs::msg::Detection3DArray>::SharedPtr lidar_detections_subscription_;
     rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr camera_detections_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscription_;
@@ -611,6 +905,31 @@ private:
     double slow_distance_m_{12.0};
     double decision_lateral_gate_m_{2.5};
     int camera_history_size_{10};
+    int interval_frame_count_{0};
+    double interval_sum_buffer_age_ms_{0.0};
+    double interval_sum_tf_lookup_ms_{0.0};
+    double interval_sum_projection_ms_{0.0};
+    double interval_sum_association_ms_{0.0};
+    double interval_sum_decision_ms_{0.0};
+    double interval_sum_publish_ms_{0.0};
+    double interval_sum_frame_total_ms_{0.0};
+    double interval_sum_camera_lidar_skew_ms_{0.0};
+    double interval_sum_accepted_match_iou_{0.0};
+    double interval_sum_input_lidar_detections_{0.0};
+    double interval_sum_input_camera_detections_{0.0};
+    double interval_sum_matched_detections_{0.0};
+    double interval_sum_unmatched_lidar_detections_{0.0};
+    double interval_sum_unmatched_camera_detections_{0.0};
+    double interval_sum_output_tracked_objects_{0.0};
+    std::uint64_t total_received_frames_{0};
+    std::uint64_t total_processed_frames_{0};
+    std::uint64_t total_overwritten_frames_{0};
+    int profiling_interval_frames_{60};
+    bool csv_logging_{false};
+    std::string csv_log_dir_{"csv_logs/fusion_core"};
+    std::string csv_log_file_path_;
+    std::string dataset_sequence_{"unknown"};
+    std::ofstream csv_log_stream_;
 };
 
 int main(int argc, char *argv[])

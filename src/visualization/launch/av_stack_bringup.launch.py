@@ -16,6 +16,7 @@ def generate_launch_description() -> LaunchDescription:
     end_time = LaunchConfiguration("end_time")
     enable_camera_csv_logging = LaunchConfiguration("enable_camera_csv_logging")
     enable_lidar_csv_logging = LaunchConfiguration("enable_lidar_csv_logging")
+    enable_fusion_csv_logging = LaunchConfiguration("enable_fusion_csv_logging")
     launch_rviz = LaunchConfiguration("launch_rviz")
     enable_point_cloud = LaunchConfiguration("enable_point_cloud")
     enable_gray_images = LaunchConfiguration("enable_gray_images")
@@ -63,6 +64,11 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_lidar_csv_logging",
                 default_value="false",
                 description="Enable interval CSV logging for the lidar processing node",
+            ),
+            DeclareLaunchArgument(
+                "enable_fusion_csv_logging",
+                default_value="false",
+                description="Enable interval CSV logging for the fusion core node",
             ),
             DeclareLaunchArgument(
                 "launch_rviz",
@@ -202,6 +208,8 @@ def generate_launch_description() -> LaunchDescription:
                     {"stop_distance_m": 6.0},
                     {"slow_distance_m": 12.0},
                     {"decision_lateral_gate_m": 2.5},
+                    {"enable_csv_logging": enable_fusion_csv_logging},
+                    {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
             ),
 
