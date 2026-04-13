@@ -186,6 +186,24 @@ def generate_launch_description() -> LaunchDescription:
                     {"camera_name": "p2"},
                 ],
             ),
+            Node(
+                package='fusion_core',
+                name="fusion_core",
+                executable='fusion_core',
+                parameters=[
+                    {"lidar_detections_topic": "lidar_detections"},
+                    {"camera_detections_topic": "object_detections"},
+                    {"camera_info_topic": "p2_camera_info"},
+                    {"tracked_objects_topic": "tracked_objects"},
+                    {"decision_state_topic": "decision_state"},
+                    {"camera_sync_tolerance_ms": 100.0},
+                    {"match_iou_threshold": 0.10},
+                    {"max_match_center_distance_px": 160.0},
+                    {"stop_distance_m": 6.0},
+                    {"slow_distance_m": 12.0},
+                    {"decision_lateral_gate_m": 2.5},
+                ],
+            ),
 
             
         ]
