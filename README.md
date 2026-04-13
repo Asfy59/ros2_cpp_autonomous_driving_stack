@@ -219,24 +219,36 @@ The `camera_processing` node currently performs:
 2. ROS `sensor_msgs/Image` to OpenCV conversion with `cv_bridge`
 3. ONNX Runtime-based YOLO inference
 4. publication of `vision_msgs/Detection2DArray`
-5. optional publication of an overlay image for debugging in RViz2
-6. interval-based runtime profiling and optional CSV export
+5. optional publication of `sensor_msgs/CameraInfo` derived from KITTI calibration for downstream fusion
+6. optional publication of an overlay image for debugging in RViz2
+7. interval-based runtime profiling and optional CSV export
 
 Current configurable parameters:
 
 - `processing_rate`
 - `model_path`
+- `publish_camera_info`
 - `publish_overlay_image`
 - `profiling_interval_frames`
 - `enable_csv_logging`
 - `csv_log_dir`
+- `dataset_path`
 - `dataset_sequence`
+- `camera_name`
 
 Current camera topics of interest:
 
 - `/p2_img`
 - `/object_detections`
+- `/p2_camera_info` when enabled
 - `/overlay_image` when enabled
+
+Current camera-side detection visualization:
+
+- object detections rendered on the monocular input image
+- useful for quickly checking detector coverage and label placement before fusion
+
+![Camera object detection overlay](docs/Object_detection.png)
 
 ## LiDAR Processing Visuals
 
@@ -327,6 +339,7 @@ Current camera topics of interest:
 
 - `/p2_img`
 - `/object_detections`
+- `/p2_camera_info` when enabled
 
 ## Attribution
 
