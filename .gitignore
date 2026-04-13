@@ -7,3 +7,5 @@ kitti_dataset/
 .codex
 __pycache__/
 *.pyc
+models/*
+!models/.gitkeep
