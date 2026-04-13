@@ -1,10 +1,16 @@
 #include <rclcpp/rclcpp.hpp>
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
+#include <string>
+#include <vector>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include "vision_msgs/msg/detection2_d_array.hpp"
@@ -53,7 +59,12 @@ private:
     rclcpp::TimerBase::SharedPtr processing_timer_;
     rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr object_bbox_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr overlay_image_publisher_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_publisher_;
     bool publish_overlay_image_{false};
+    bool publish_camera_info_{false};
+    std::string dataset_path_;
+    std::string camera_name_{"p2"};
+    sensor_msgs::msg::CameraInfo camera_info_template_;
     int interval_frame_count_{0};
     double interval_sum_buffer_age_ms_{0.0};
     double interval_sum_conversion_ms_{0.0};
@@ -80,18 +91,24 @@ public:
         this->declare_parameter<double>("processing_rate", 10.0);
         this->declare_parameter<std::string>("model_path", "models/yolo/yolov8n.onnx");
         this->declare_parameter<bool>("publish_overlay_image", false);
+        this->declare_parameter<bool>("publish_camera_info", false);
         this->declare_parameter<int>("profiling_interval_frames", 60);
         this->declare_parameter<bool>("enable_csv_logging", false);
         this->declare_parameter<std::string>("csv_log_dir", "csv_logs/camera_processing");
+        this->declare_parameter<std::string>("dataset_path", "");
         this->declare_parameter<std::string>("dataset_sequence", "unknown");
+        this->declare_parameter<std::string>("camera_name", "p2");
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("model_path", model_path_);
         this->get_parameter("publish_overlay_image", publish_overlay_image_);
+        this->get_parameter("publish_camera_info", publish_camera_info_);
         this->get_parameter("profiling_interval_frames", profiling_interval_frames_);
         this->get_parameter("enable_csv_logging", csv_logging_);
         this->get_parameter("csv_log_dir", csv_log_dir_);
+        this->get_parameter("dataset_path", dataset_path_);
         this->get_parameter("dataset_sequence", dataset_sequence_);
+        this->get_parameter("camera_name", camera_name_);
 
         processing_timer_ = this->create_wall_timer(
             processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
@@ -110,6 +127,16 @@ public:
             overlay_image_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
                 "overlay_image",
                 10);
+        }
+        if (publish_camera_info_ && load_camera_info_template())
+        {
+            camera_info_publisher_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
+                "camera_info",
+                10);
+        }
+        else
+        {
+            publish_camera_info_ = false;
         }
         initialize_csv_logging();
         RCLCPP_INFO(this->get_logger(), "CameraProcessing node has been initialized.");
@@ -179,6 +206,7 @@ public:
             {
                 ScopedTimer publish_timer(metrics.publish_time_ms);
                 publish_object_detections(detections, image_to_process_->header);
+                publish_camera_info(image_to_process_->header, image_to_process_->width, image_to_process_->height);
             }
             if (publish_overlay_image_)
             {
@@ -273,6 +301,137 @@ public:
         {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception while converting overlay image: %s", e.what());
         }
+    }
+
+    void publish_camera_info(
+        const std_msgs::msg::Header &img_header,
+        const std::uint32_t image_width,
+        const std::uint32_t image_height)
+    {
+        if (!publish_camera_info_ || !camera_info_publisher_)
+        {
+            return;
+        }
+
+        auto camera_info_msg = camera_info_template_;
+        camera_info_msg.header = img_header;
+        camera_info_msg.width = image_width;
+        camera_info_msg.height = image_height;
+        camera_info_publisher_->publish(camera_info_msg);
+    }
+
+    bool load_camera_info_template()
+    {
+        const auto calib_path = build_kitti_calibration_path();
+        if (calib_path.empty())
+        {
+            RCLCPP_WARN(this->get_logger(), "CameraInfo publishing requested but dataset_path/dataset_sequence is not configured.");
+            return false;
+        }
+
+        std::ifstream calib_stream(calib_path);
+        if (!calib_stream.is_open())
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to open KITTI calibration file '%s'.", calib_path.c_str());
+            return false;
+        }
+
+        const std::string projection_label = build_projection_label();
+        std::string line;
+        while (std::getline(calib_stream, line))
+        {
+            if (!starts_with(line, projection_label))
+            {
+                continue;
+            }
+
+            std::istringstream line_stream(line.substr(projection_label.size()));
+            std::array<double, 12> projection{};
+            for (double &value : projection)
+            {
+                if (!(line_stream >> value))
+                {
+                    RCLCPP_WARN(this->get_logger(), "Invalid projection row '%s' in '%s'.", projection_label.c_str(), calib_path.c_str());
+                    return false;
+                }
+            }
+
+            camera_info_template_.distortion_model = "plumb_bob";
+            camera_info_template_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
+            camera_info_template_.k = {
+                projection[0], projection[1], projection[2],
+                projection[4], projection[5], projection[6],
+                projection[8], projection[9], projection[10]};
+            camera_info_template_.r = {
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0};
+            camera_info_template_.p = {
+                projection[0], projection[1], projection[2], projection[3],
+                projection[4], projection[5], projection[6], projection[7],
+                projection[8], projection[9], projection[10], projection[11]};
+
+            RCLCPP_INFO(this->get_logger(), "Loaded KITTI projection row '%s' from '%s'.", projection_label.c_str(), calib_path.c_str());
+            return true;
+        }
+
+        RCLCPP_WARN(this->get_logger(), "Projection row '%s' was not found in '%s'.", projection_label.c_str(), calib_path.c_str());
+        return false;
+    }
+
+    std::string build_kitti_calibration_path() const
+    {
+        if (dataset_path_.empty())
+        {
+            return "";
+        }
+
+        return (std::filesystem::path(dataset_path_) /
+                "data_odometry_calib" /
+                "dataset" /
+                "sequences" /
+                normalize_dataset_sequence(dataset_sequence_) /
+                "calib.txt").string();
+    }
+
+    std::string build_projection_label() const
+    {
+        std::string label = camera_name_;
+        std::transform(label.begin(), label.end(), label.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::toupper(ch));
+        });
+        return label + ":";
+    }
+
+    static bool starts_with(const std::string &value, const std::string &prefix)
+    {
+        return value.rfind(prefix, 0) == 0;
+    }
+
+    static std::string normalize_dataset_sequence(std::string sequence)
+    {
+        sequence.erase(std::remove_if(sequence.begin(), sequence.end(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        }), sequence.end());
+
+        if (sequence.empty())
+        {
+            return sequence;
+        }
+
+        const bool numeric = std::all_of(sequence.begin(), sequence.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        });
+        if (!numeric)
+        {
+            return sequence;
+        }
+
+        while (sequence.size() < 2)
+        {
+            sequence.insert(sequence.begin(), '0');
+        }
+        return sequence;
     }
 
     void update_profiling_metrics(const FrameProcessingMetrics &metrics)

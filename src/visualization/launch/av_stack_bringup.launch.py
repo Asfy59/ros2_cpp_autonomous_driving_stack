@@ -172,14 +172,18 @@ def generate_launch_description() -> LaunchDescription:
                 executable='camera_processing',
                 remappings=[
                     ("camera_in", "/p2_img"),
-                    ("object_detections", "object_detections")
+                    ("object_detections", "object_detections"),
+                    ("camera_info", "p2_camera_info"),
                 ],
                 parameters=[
                     {"processing_rate": 10.0},
                     {"model_path": "models/yolo/yolov8n.onnx"},
                     {"publish_overlay_image": True},
+                    {"publish_camera_info": True},
+                    {"dataset_path": ParameterValue(dataset_path, value_type=str)},
                     {"enable_csv_logging": enable_camera_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
+                    {"camera_name": "p2"},
                 ],
             ),
 
