@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -93,6 +94,12 @@ static double read_peak_rss_mb()
 class LidarProcessing : public rclcpp::Node
 {
 public:
+    struct BufferedCloud
+    {
+        sensor_msgs::msg::PointCloud2::SharedPtr msg;
+        std::chrono::steady_clock::time_point received_steady;
+    };
+
     LidarProcessing() : Node("lidar_processing")
     {
         this->declare_parameter<double>("processing_rate", 15.0);
@@ -110,6 +117,8 @@ public:
         this->declare_parameter<bool>("enable_csv_logging", false);
         this->declare_parameter<std::string>("csv_log_dir", "csv_logs/lidar_processing");
         this->declare_parameter<std::string>("dataset_sequence", "unknown");
+        this->declare_parameter<int>("input_queue_size", 3);
+        this->declare_parameter<double>("max_buffer_age_ms", 300.0);
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("crop_box_min", crop_box_min_);
@@ -126,6 +135,8 @@ public:
         this->get_parameter("enable_csv_logging", csv_logging_);
         this->get_parameter("csv_log_dir", csv_log_dir_);
         this->get_parameter("dataset_sequence", dataset_sequence_);
+        input_queue_size_ = std::max(1, static_cast<int>(this->get_parameter("input_queue_size").as_int()));
+        max_buffer_age_ms_ = std::max(0.0, this->get_parameter("max_buffer_age_ms").as_double());
         
         crop_box_min_vec = Eigen::Vector4f(crop_box_min_[0], crop_box_min_[1], crop_box_min_[2], 1.0);
         crop_box_max_vec = Eigen::Vector4f(crop_box_max_[0], crop_box_max_[1], crop_box_max_[2], 1.0);
@@ -162,13 +173,12 @@ public:
     void lidar_subscriber_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
-        if (new_cloud_available_)
+        if (static_cast<int>(cloud_queue_.size()) >= input_queue_size_)
         {
+            cloud_queue_.pop_front();
             total_overwritten_frames_++;
         }
-        latest_cloud_ = msg;
-        latest_cloud_received_steady_ = std::chrono::steady_clock::now();
-        new_cloud_available_ = true;
+        cloud_queue_.push_back(BufferedCloud{msg, std::chrono::steady_clock::now()});
         total_received_frames_++;
     }
 
@@ -182,11 +192,27 @@ public:
 
             {
                 std::lock_guard<std::mutex> lock(cloud_mutex_);
-                if (new_cloud_available_ && latest_cloud_)
+                const auto now_steady = std::chrono::steady_clock::now();
+                while (!cloud_queue_.empty())
                 {
-                    cloud_to_process_ = latest_cloud_;
-                    cloud_received_steady_ = latest_cloud_received_steady_;
-                    new_cloud_available_ = false;
+                    const double queue_age_ms =
+                        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            now_steady - cloud_queue_.front().received_steady)
+                            .count();
+                    if (queue_age_ms <= max_buffer_age_ms_)
+                    {
+                        break;
+                    }
+
+                    cloud_queue_.pop_front();
+                    total_overwritten_frames_++;
+                }
+
+                if (!cloud_queue_.empty())
+                {
+                    cloud_to_process_ = cloud_queue_.front().msg;
+                    cloud_received_steady_ = cloud_queue_.front().received_steady;
+                    cloud_queue_.pop_front();
                 }
                 else
                 {
@@ -921,9 +947,7 @@ private:
     }
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_subscription_;
-    sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud_;
-    std::chrono::steady_clock::time_point latest_cloud_received_steady_;
-    bool new_cloud_available_{false};
+    std::deque<BufferedCloud> cloud_queue_;
     std::mutex cloud_mutex_;
     rclcpp::TimerBase::SharedPtr processing_timer_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr processed_cloud_publisher_;
@@ -940,6 +964,8 @@ private:
     int max_cluster_points_;
     std::vector<double> min_cluster_size_;
     std::vector<double> max_cluster_size_;
+    int input_queue_size_{3};
+    double max_buffer_age_ms_{300.0};
     Eigen::Vector4f crop_box_min_vec;
     Eigen::Vector4f crop_box_max_vec;
     Eigen::Vector4f voxel_leaf_size_vec;

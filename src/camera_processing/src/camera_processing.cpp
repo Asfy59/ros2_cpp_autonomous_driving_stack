@@ -3,6 +3,7 @@
 #include <array>
 #include <cctype>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -97,14 +98,18 @@ private:
         std::size_t num_detections{0};
     };
 
+    struct BufferedImage
+    {
+        sensor_msgs::msg::Image::SharedPtr msg;
+        std::chrono::steady_clock::time_point received_steady;
+    };
+
     double processing_rate_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr camera_image_subscription_;
     std::mutex image_stream_mutex_;
-    sensor_msgs::msg::Image::SharedPtr latest_image_;
-    std::chrono::steady_clock::time_point latest_image_received_steady_;
+    std::deque<BufferedImage> image_queue_;
     std::unique_ptr<YoloDetector> yolo_detector_;
     std::string model_path_;
-    bool new_image_available_{false};
     rclcpp::TimerBase::SharedPtr processing_timer_;
     rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr object_bbox_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr overlay_image_publisher_;
@@ -114,6 +119,8 @@ private:
     std::string dataset_path_;
     std::string camera_name_{"p2"};
     sensor_msgs::msg::CameraInfo camera_info_template_;
+    int input_queue_size_{4};
+    double max_buffer_age_ms_{300.0};
     int interval_frame_count_{0};
     double interval_sum_buffer_age_ms_{0.0};
     double interval_sum_conversion_ms_{0.0};
@@ -151,6 +158,8 @@ public:
         this->declare_parameter<std::string>("dataset_path", "");
         this->declare_parameter<std::string>("dataset_sequence", "unknown");
         this->declare_parameter<std::string>("camera_name", "p2");
+        this->declare_parameter<int>("input_queue_size", 4);
+        this->declare_parameter<double>("max_buffer_age_ms", 300.0);
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("model_path", model_path_);
@@ -162,6 +171,8 @@ public:
         this->get_parameter("dataset_path", dataset_path_);
         this->get_parameter("dataset_sequence", dataset_sequence_);
         this->get_parameter("camera_name", camera_name_);
+        input_queue_size_ = std::max(1, static_cast<int>(this->get_parameter("input_queue_size").as_int()));
+        max_buffer_age_ms_ = std::max(0.0, this->get_parameter("max_buffer_age_ms").as_double());
 
         processing_timer_ = this->create_wall_timer(
             processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
@@ -200,15 +211,13 @@ public:
     {
 
         std::lock_guard<std::mutex> lock(image_stream_mutex_);
-        if (new_image_available_)
+        if (static_cast<int>(image_queue_.size()) >= input_queue_size_)
         {
+            image_queue_.pop_front();
             total_overwritten_frames_++;
         }
-        latest_image_ = msg;
-        latest_image_received_steady_ = std::chrono::steady_clock::now();
-        new_image_available_ = true; // RCLCPP_INFO(this->get_logger(), "Received new image. Input callback time: %.6f seconds.", input_time.count());
+        image_queue_.push_back(BufferedImage{msg, std::chrono::steady_clock::now()});
         total_received_frames_++;
-        // RCLCPP_INFO(this->get_logger(), "Received new image with %d x %d pixels.", msg->width, msg->height);
     }
 
     void process_latest_image()
@@ -222,17 +231,30 @@ public:
 
             {
                 std::lock_guard<std::mutex> lock(image_stream_mutex_);
-                if (new_image_available_ && latest_image_)
+                const auto now_steady = std::chrono::steady_clock::now();
+                while (!image_queue_.empty())
                 {
-                    // Process the latest image here
-                    // RCLCPP_INFO(this->get_logger(), "Processing new image with %d x %d pixels.", latest_image_->width, latest_image_->height);
-                    image_to_process_ = latest_image_;
-                    image_received_steady_ = latest_image_received_steady_;
-                    new_image_available_ = false; // Reset the flag after processing
+                    const double queue_age_ms =
+                        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            now_steady - image_queue_.front().received_steady)
+                            .count();
+                    if (queue_age_ms <= max_buffer_age_ms_)
+                    {
+                        break;
+                    }
+
+                    image_queue_.pop_front();
+                    total_overwritten_frames_++;
+                }
+
+                if (!image_queue_.empty())
+                {
+                    image_to_process_ = image_queue_.front().msg;
+                    image_received_steady_ = image_queue_.front().received_steady;
+                    image_queue_.pop_front();
                 }
                 else
                 {
-                    // No new image available, skip processing
                     return;
                 }
             }
