@@ -5,15 +5,15 @@ lidar_processing:
     processing_rate: 10.0
     input_queue_size: 3
     max_buffer_age_ms: 300.0
-    crop_box_min: [-10.0, -20.0, -2.0]
-    crop_box_max: [30.0, 20.0, 2.0]
-    voxel_leaf_size: [0.1, 0.1, 0.1]
+    crop_box_min: [0.0, -15.0, -2.0]
+    crop_box_max: [30.0, 15.0, 2.0]
+    voxel_leaf_size: [0.15, 0.15, 0.15]
     publish_processed_lidar_pc: true
     enable_ground_segmentation: true
     cluster_tolerance_m: 0.75
     min_cluster_points: 5
     max_cluster_points: 5000
-    min_cluster_size: [0.2, 0.2, 0.2]
+    min_cluster_size: [0.4, 0.4, 0.4]
     max_cluster_size: [15.0, 8.0, 5.0]
     profiling_interval_frames: 60
     enable_csv_logging: true
@@ -41,7 +41,7 @@ fusion_core:
     tracked_objects_topic: "tracked_objects"
     decision_state_topic: "decision_state"
     fusion_overlay_topic: "fusion_overlay_image"
-    camera_sync_tolerance_ms: 100.0
+    camera_sync_tolerance_ms: 200.0
     match_iou_threshold: 0.10
     max_match_center_distance_px: 160.0
     tf_lookup_timeout_ms: 100.0

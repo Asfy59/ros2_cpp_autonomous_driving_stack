@@ -300,6 +300,7 @@ private:
         {
             camera_image_buffer_.pop_front();
         }
+        //RCLCPP_INFO(this->get_logger(), "Received camera image with timestamp %u.%u", msg->header.stamp.sec, msg->header.stamp.nanosec);
     }
 
     void lidar_detections_callback(const vision_msgs::msg::Detection3DArray::SharedPtr msg)
