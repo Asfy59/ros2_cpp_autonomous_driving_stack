@@ -16,13 +16,19 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include <auto_stack_msgs/msg/decision_state.hpp>
 #include <auto_stack_msgs/msg/tracked_object.hpp>
 #include <auto_stack_msgs/msg/tracked_object_array.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/imgproc.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/LinearMath/Vector3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -50,6 +56,51 @@ struct ScopedTimer
     }
 };
 
+// These process stats are Linux-specific, which is fine for the current dev setup.
+static double read_process_cpu_time_ms()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    const double user_time_ms =
+        (static_cast<double>(usage.ru_utime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_utime.tv_usec) / 1000.0);
+    const double system_time_ms =
+        (static_cast<double>(usage.ru_stime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_stime.tv_usec) / 1000.0);
+    return user_time_ms + system_time_ms;
+}
+
+static double read_current_rss_mb()
+{
+    std::ifstream statm_stream("/proc/self/statm");
+    long total_pages = 0;
+    long resident_pages = 0;
+    if (!(statm_stream >> total_pages >> resident_pages))
+    {
+        return 0.0;
+    }
+    (void)total_pages;
+
+    const long page_size_bytes = sysconf(_SC_PAGESIZE);
+    return (static_cast<double>(resident_pages) * static_cast<double>(page_size_bytes)) /
+           (1024.0 * 1024.0);
+}
+
+static double read_peak_rss_mb()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    return static_cast<double>(usage.ru_maxrss) / 1024.0;
+}
+
 class FusionCore : public rclcpp::Node
 {
 public:
@@ -60,9 +111,11 @@ public:
     {
         this->declare_parameter<std::string>("lidar_detections_topic", "lidar_detections");
         this->declare_parameter<std::string>("camera_detections_topic", "object_detections");
+        this->declare_parameter<std::string>("camera_image_topic", "/p2_img");
         this->declare_parameter<std::string>("camera_info_topic", "p2_camera_info");
         this->declare_parameter<std::string>("tracked_objects_topic", "tracked_objects");
         this->declare_parameter<std::string>("decision_state_topic", "decision_state");
+        this->declare_parameter<std::string>("fusion_overlay_topic", "fusion_overlay_image");
         this->declare_parameter<double>("camera_sync_tolerance_ms", 100.0);
         this->declare_parameter<double>("match_iou_threshold", 0.10);
         this->declare_parameter<double>("max_match_center_distance_px", 160.0);
@@ -74,14 +127,17 @@ public:
         this->declare_parameter<int>("camera_history_size", 10);
         this->declare_parameter<int>("profiling_interval_frames", 60);
         this->declare_parameter<bool>("enable_csv_logging", false);
+        this->declare_parameter<bool>("publish_overlay_image", false);
         this->declare_parameter<std::string>("csv_log_dir", "csv_logs/fusion_core");
         this->declare_parameter<std::string>("dataset_sequence", "unknown");
 
         const auto lidar_detections_topic = this->get_parameter("lidar_detections_topic").as_string();
         const auto camera_detections_topic = this->get_parameter("camera_detections_topic").as_string();
+        const auto camera_image_topic = this->get_parameter("camera_image_topic").as_string();
         const auto camera_info_topic = this->get_parameter("camera_info_topic").as_string();
         const auto tracked_objects_topic = this->get_parameter("tracked_objects_topic").as_string();
         const auto decision_state_topic = this->get_parameter("decision_state_topic").as_string();
+        const auto fusion_overlay_topic = this->get_parameter("fusion_overlay_topic").as_string();
 
         camera_sync_tolerance_ms_ = this->get_parameter("camera_sync_tolerance_ms").as_double();
         match_iou_threshold_ = this->get_parameter("match_iou_threshold").as_double();
@@ -94,6 +150,7 @@ public:
         camera_history_size_ = std::max(1, static_cast<int>(this->get_parameter("camera_history_size").as_int()));
         profiling_interval_frames_ = static_cast<int>(this->get_parameter("profiling_interval_frames").as_int());
         csv_logging_ = this->get_parameter("enable_csv_logging").as_bool();
+        publish_overlay_image_ = this->get_parameter("publish_overlay_image").as_bool();
         csv_log_dir_ = this->get_parameter("csv_log_dir").as_string();
         dataset_sequence_ = this->get_parameter("dataset_sequence").as_string();
 
@@ -108,6 +165,16 @@ public:
             10,
             std::bind(&FusionCore::camera_info_callback, this, std::placeholders::_1));
 
+        if (publish_overlay_image_)
+        {
+            camera_image_subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
+                camera_image_topic,
+                10,
+                std::bind(&FusionCore::camera_image_callback, this, std::placeholders::_1));
+            fusion_overlay_publisher_ =
+                this->create_publisher<sensor_msgs::msg::Image>(fusion_overlay_topic, 10);
+        }
+
         lidar_detections_subscription_ = this->create_subscription<vision_msgs::msg::Detection3DArray>(
             lidar_detections_topic,
             10,
@@ -119,6 +186,7 @@ public:
             this->create_publisher<auto_stack_msgs::msg::DecisionState>(decision_state_topic, 10);
 
         initialize_csv_logging();
+        reset_resource_window();
         RCLCPP_INFO(this->get_logger(), "FusionCore node has been initialized.");
     }
 
@@ -131,9 +199,12 @@ private:
         double association_time_ms{0.0};
         double decision_time_ms{0.0};
         double publish_time_ms{0.0};
+        double overlay_time_ms{0.0};
         double frame_total_time_ms{0.0};
         double camera_lidar_skew_ms{0.0};
         double accepted_match_iou{0.0};
+        double rss_mb{0.0};
+        double peak_rss_mb{0.0};
         std::size_t input_lidar_detections{0};
         std::size_t input_camera_detections{0};
         std::size_t matched_detections{0};
@@ -184,6 +255,12 @@ private:
         double skew_ms{0.0};
     };
 
+    struct ImageFrameSelection
+    {
+        sensor_msgs::msg::Image::SharedPtr image;
+        double skew_ms{0.0};
+    };
+
     void camera_detections_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg)
     {
         if (!msg)
@@ -210,6 +287,21 @@ private:
         latest_camera_info_ = msg;
     }
 
+    void camera_image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+    {
+        if (!msg)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(camera_mutex_);
+        camera_image_buffer_.push_back(msg);
+        while (static_cast<int>(camera_image_buffer_.size()) > camera_history_size_)
+        {
+            camera_image_buffer_.pop_front();
+        }
+    }
+
     void lidar_detections_callback(const vision_msgs::msg::Detection3DArray::SharedPtr msg)
     {
         if (!msg)
@@ -234,9 +326,16 @@ private:
                 tracked_objects_publisher_->publish(tracked_objects_msg);
                 decision_state_publisher_->publish(decision_state_msg);
             }
+            if (publish_overlay_image_)
+            {
+                ScopedTimer overlay_timer(metrics.overlay_time_ms);
+                publish_fusion_overlay(*msg);
+            }
         }
 
         metrics.output_tracked_objects = tracked_objects_msg.objects.size();
+        metrics.rss_mb = read_current_rss_mb();
+        metrics.peak_rss_mb = read_peak_rss_mb();
         total_processed_frames_++;
         update_profiling_metrics(metrics);
 
@@ -389,6 +488,39 @@ private:
         return latest_camera_info_;
     }
 
+    ImageFrameSelection find_nearest_camera_image(
+        const builtin_interfaces::msg::Time &target_stamp)
+    {
+        ImageFrameSelection selection;
+        std::lock_guard<std::mutex> lock(camera_mutex_);
+        if (camera_image_buffer_.empty())
+        {
+            return selection;
+        }
+
+        auto best_match = camera_image_buffer_.front();
+        double best_delta_ms = time_delta_ms(best_match->header.stamp, target_stamp);
+
+        for (const auto &candidate : camera_image_buffer_)
+        {
+            const double candidate_delta_ms = time_delta_ms(candidate->header.stamp, target_stamp);
+            if (candidate_delta_ms < best_delta_ms)
+            {
+                best_delta_ms = candidate_delta_ms;
+                best_match = candidate;
+            }
+        }
+
+        if (best_delta_ms > camera_sync_tolerance_ms_)
+        {
+            return selection;
+        }
+
+        selection.image = best_match;
+        selection.skew_ms = best_delta_ms;
+        return selection;
+    }
+
     std::optional<ImageRoi> project_lidar_box_to_image(
         const vision_msgs::msg::Detection3D &lidar_detection,
         const sensor_msgs::msg::CameraInfo &camera_info,
@@ -531,6 +663,96 @@ private:
         return best_match;
     }
 
+    void publish_fusion_overlay(const vision_msgs::msg::Detection3DArray &lidar_detections)
+    {
+        if (!fusion_overlay_publisher_)
+        {
+            return;
+        }
+
+        const auto image_selection = find_nearest_camera_image(lidar_detections.header.stamp);
+        const auto camera_selection = find_nearest_camera_detections(lidar_detections.header.stamp);
+        auto camera_info = get_latest_camera_info();
+        if (!image_selection.image || !camera_selection.detections || !camera_info)
+        {
+            return;
+        }
+
+        cv::Mat overlay_image;
+        try
+        {
+            overlay_image = cv_bridge::toCvCopy(
+                                image_selection.image,
+                                sensor_msgs::image_encodings::BGR8)
+                                ->image;
+        }
+        catch (const cv_bridge::Exception &exception)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Failed to build fusion overlay image: %s",
+                exception.what());
+            return;
+        }
+
+        const auto &camera_detections = *camera_selection.detections;
+        for (const auto &camera_detection : camera_detections.detections)
+        {
+            const auto camera_roi = detection_2d_to_roi(camera_detection);
+            draw_roi(
+                overlay_image,
+                camera_roi,
+                cv::Scalar(255, 0, 0),
+                camera_detection.results.empty() ? "cam" : class_id_to_label(camera_detection.results.front().hypothesis.class_id));
+        }
+
+        std::vector<bool> camera_detection_used(camera_detections.detections.size(), false);
+        for (std::size_t lidar_index = 0; lidar_index < lidar_detections.detections.size(); ++lidar_index)
+        {
+            double tf_lookup_time_ms = 0.0;
+            double projection_time_ms = 0.0;
+            const auto projected_roi = project_lidar_box_to_image(
+                lidar_detections.detections[lidar_index],
+                *camera_info,
+                tf_lookup_time_ms,
+                projection_time_ms);
+            if (!projected_roi)
+            {
+                continue;
+            }
+
+            const auto match = find_best_camera_match(*projected_roi, camera_detections, camera_detection_used);
+            const bool matched = match.has_value();
+            if (matched)
+            {
+                camera_detection_used[match->detection_index] = true;
+            }
+
+            std::ostringstream label;
+            label << "lidar_" << lidar_index;
+            if (matched)
+            {
+                label << " -> " << class_id_to_label(match->class_id);
+            }
+
+            draw_roi(
+                overlay_image,
+                *projected_roi,
+                matched ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255),
+                label.str());
+        }
+
+        std_msgs::msg::Header header = image_selection.image->header;
+        header.stamp = this->get_clock()->now();
+        cv_bridge::CvImage overlay_bridge(
+            header,
+            sensor_msgs::image_encodings::BGR8,
+            overlay_image);
+        fusion_overlay_publisher_->publish(*overlay_bridge.toImageMsg());
+    }
+
     auto_stack_msgs::msg::DecisionState build_decision_state(
         const auto_stack_msgs::msg::TrackedObjectArray &tracked_objects_msg) const
     {
@@ -643,6 +865,46 @@ private:
         return roi;
     }
 
+    static void draw_roi(
+        cv::Mat &image,
+        const ImageRoi &roi,
+        const cv::Scalar &color,
+        const std::string &label)
+    {
+        const cv::Point top_left(
+            static_cast<int>(std::round(roi.min_x)),
+            static_cast<int>(std::round(roi.min_y)));
+        const cv::Point bottom_right(
+            static_cast<int>(std::round(roi.max_x)),
+            static_cast<int>(std::round(roi.max_y)));
+
+        cv::rectangle(image, top_left, bottom_right, color, 2);
+
+        if (label.empty())
+        {
+            return;
+        }
+
+        int baseline = 0;
+        const cv::Size label_size =
+            cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+        const int label_top = std::max(top_left.y, label_size.height);
+        cv::rectangle(
+            image,
+            cv::Point(top_left.x, label_top - label_size.height),
+            cv::Point(top_left.x + label_size.width, label_top + baseline),
+            color,
+            cv::FILLED);
+        cv::putText(
+            image,
+            label,
+            cv::Point(top_left.x, label_top),
+            cv::FONT_HERSHEY_SIMPLEX,
+            0.5,
+            cv::Scalar(0, 0, 0),
+            1);
+    }
+
     static double compute_iou(const ImageRoi &lhs, const ImageRoi &rhs)
     {
         const double intersect_min_x = std::max(lhs.min_x, rhs.min_x);
@@ -717,9 +979,12 @@ private:
         interval_sum_association_ms_ += metrics.association_time_ms;
         interval_sum_decision_ms_ += metrics.decision_time_ms;
         interval_sum_publish_ms_ += metrics.publish_time_ms;
+        interval_sum_overlay_ms_ += metrics.overlay_time_ms;
         interval_sum_frame_total_ms_ += metrics.frame_total_time_ms;
         interval_sum_camera_lidar_skew_ms_ += metrics.camera_lidar_skew_ms;
         interval_sum_accepted_match_iou_ += metrics.accepted_match_iou;
+        interval_sum_rss_mb_ += metrics.rss_mb;
+        interval_sum_peak_rss_mb_ += metrics.peak_rss_mb;
         interval_sum_input_lidar_detections_ += metrics.input_lidar_detections;
         interval_sum_input_camera_detections_ += metrics.input_camera_detections;
         interval_sum_matched_detections_ += metrics.matched_detections;
@@ -730,6 +995,9 @@ private:
 
         if (interval_frame_count_ >= profiling_interval_frames_)
         {
+            double avg_process_cpu_percent = 0.0;
+            double effective_output_rate_hz = 0.0;
+            compute_interval_resource_metrics(avg_process_cpu_percent, effective_output_rate_hz);
             write_csv_interval_metrics(
                 interval_frame_count_,
                 interval_sum_buffer_age_ms_ / interval_frame_count_,
@@ -738,9 +1006,14 @@ private:
                 interval_sum_association_ms_ / interval_frame_count_,
                 interval_sum_decision_ms_ / interval_frame_count_,
                 interval_sum_publish_ms_ / interval_frame_count_,
+                interval_sum_overlay_ms_ / interval_frame_count_,
                 interval_sum_frame_total_ms_ / interval_frame_count_,
                 interval_sum_camera_lidar_skew_ms_ / interval_frame_count_,
                 interval_sum_accepted_match_iou_ / interval_frame_count_,
+                avg_process_cpu_percent,
+                effective_output_rate_hz,
+                interval_sum_rss_mb_ / interval_frame_count_,
+                interval_sum_peak_rss_mb_ / interval_frame_count_,
                 interval_sum_input_lidar_detections_ / interval_frame_count_,
                 interval_sum_input_camera_detections_ / interval_frame_count_,
                 interval_sum_matched_detections_ / interval_frame_count_,
@@ -755,9 +1028,12 @@ private:
             interval_sum_association_ms_ = 0.0;
             interval_sum_decision_ms_ = 0.0;
             interval_sum_publish_ms_ = 0.0;
+            interval_sum_overlay_ms_ = 0.0;
             interval_sum_frame_total_ms_ = 0.0;
             interval_sum_camera_lidar_skew_ms_ = 0.0;
             interval_sum_accepted_match_iou_ = 0.0;
+            interval_sum_rss_mb_ = 0.0;
+            interval_sum_peak_rss_mb_ = 0.0;
             interval_sum_input_lidar_detections_ = 0.0;
             interval_sum_input_camera_detections_ = 0.0;
             interval_sum_matched_detections_ = 0.0;
@@ -788,7 +1064,7 @@ private:
                 return;
             }
 
-            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_tf_lookup_time_ms,avg_projection_time_ms,avg_association_time_ms,avg_decision_time_ms,avg_publish_time_ms,avg_frame_total_time_ms,avg_camera_lidar_skew_ms,avg_accepted_match_iou,avg_input_lidar_detections,avg_input_camera_detections,avg_matched_detections,avg_unmatched_lidar_detections,avg_unmatched_camera_detections,avg_output_tracked_objects,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_tf_lookup_time_ms,avg_projection_time_ms,avg_association_time_ms,avg_decision_time_ms,avg_publish_time_ms,avg_overlay_time_ms,avg_frame_total_time_ms,avg_camera_lidar_skew_ms,avg_accepted_match_iou,avg_process_cpu_percent,effective_output_rate_hz,avg_rss_mb,avg_peak_rss_mb,avg_input_lidar_detections,avg_input_camera_detections,avg_matched_detections,avg_unmatched_lidar_detections,avg_unmatched_camera_detections,avg_output_tracked_objects,total_received_frames,total_processed_frames,total_overwritten_frames\n";
             csv_log_stream_.flush();
             RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
         }
@@ -807,9 +1083,14 @@ private:
         double avg_association_ms,
         double avg_decision_ms,
         double avg_publish_ms,
+        double avg_overlay_ms,
         double avg_frame_total_ms,
         double avg_camera_lidar_skew_ms,
         double avg_accepted_match_iou,
+        double avg_process_cpu_percent,
+        double effective_output_rate_hz,
+        double avg_rss_mb,
+        double avg_peak_rss_mb,
         double avg_input_lidar_detections,
         double avg_input_camera_detections,
         double avg_matched_detections,
@@ -832,9 +1113,14 @@ private:
                         << avg_association_ms << ','
                         << avg_decision_ms << ','
                         << avg_publish_ms << ','
+                        << avg_overlay_ms << ','
                         << avg_frame_total_ms << ','
                         << avg_camera_lidar_skew_ms << ','
                         << avg_accepted_match_iou << ','
+                        << avg_process_cpu_percent << ','
+                        << effective_output_rate_hz << ','
+                        << avg_rss_mb << ','
+                        << avg_peak_rss_mb << ','
                         << avg_input_lidar_detections << ','
                         << avg_input_camera_detections << ','
                         << avg_matched_detections << ','
@@ -883,17 +1169,48 @@ private:
         return value;
     }
 
+    void reset_resource_window()
+    {
+        interval_resource_window_start_ = std::chrono::steady_clock::now();
+        interval_resource_window_cpu_ms_ = read_process_cpu_time_ms();
+    }
+
+    void compute_interval_resource_metrics(
+        double &avg_process_cpu_percent,
+        double &effective_output_rate_hz)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_wall_ms =
+            std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                now - interval_resource_window_start_)
+                .count();
+        const double current_cpu_ms = read_process_cpu_time_ms();
+        const double elapsed_cpu_ms =
+            std::max(0.0, current_cpu_ms - interval_resource_window_cpu_ms_);
+
+        avg_process_cpu_percent =
+            elapsed_wall_ms > 0.0 ? (100.0 * elapsed_cpu_ms / elapsed_wall_ms) : 0.0;
+        effective_output_rate_hz =
+            elapsed_wall_ms > 0.0 ? (1000.0 * static_cast<double>(interval_frame_count_) / elapsed_wall_ms) : 0.0;
+
+        interval_resource_window_start_ = now;
+        interval_resource_window_cpu_ms_ = current_cpu_ms;
+    }
+
     rclcpp::Subscription<vision_msgs::msg::Detection3DArray>::SharedPtr lidar_detections_subscription_;
     rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr camera_detections_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscription_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr camera_image_subscription_;
     rclcpp::Publisher<auto_stack_msgs::msg::TrackedObjectArray>::SharedPtr tracked_objects_publisher_;
     rclcpp::Publisher<auto_stack_msgs::msg::DecisionState>::SharedPtr decision_state_publisher_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr fusion_overlay_publisher_;
 
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
 
     std::mutex camera_mutex_;
     std::deque<vision_msgs::msg::Detection2DArray::SharedPtr> camera_detections_buffer_;
+    std::deque<sensor_msgs::msg::Image::SharedPtr> camera_image_buffer_;
     sensor_msgs::msg::CameraInfo::SharedPtr latest_camera_info_;
 
     double camera_sync_tolerance_ms_{100.0};
@@ -912,20 +1229,26 @@ private:
     double interval_sum_association_ms_{0.0};
     double interval_sum_decision_ms_{0.0};
     double interval_sum_publish_ms_{0.0};
+    double interval_sum_overlay_ms_{0.0};
     double interval_sum_frame_total_ms_{0.0};
     double interval_sum_camera_lidar_skew_ms_{0.0};
     double interval_sum_accepted_match_iou_{0.0};
+    double interval_sum_rss_mb_{0.0};
+    double interval_sum_peak_rss_mb_{0.0};
     double interval_sum_input_lidar_detections_{0.0};
     double interval_sum_input_camera_detections_{0.0};
     double interval_sum_matched_detections_{0.0};
     double interval_sum_unmatched_lidar_detections_{0.0};
     double interval_sum_unmatched_camera_detections_{0.0};
     double interval_sum_output_tracked_objects_{0.0};
+    std::chrono::steady_clock::time_point interval_resource_window_start_;
+    double interval_resource_window_cpu_ms_{0.0};
     std::uint64_t total_received_frames_{0};
     std::uint64_t total_processed_frames_{0};
     std::uint64_t total_overwritten_frames_{0};
     int profiling_interval_frames_{60};
     bool csv_logging_{false};
+    bool publish_overlay_image_{false};
     std::string csv_log_dir_{"csv_logs/fusion_core"};
     std::string csv_log_file_path_;
     std::string dataset_sequence_{"unknown"};

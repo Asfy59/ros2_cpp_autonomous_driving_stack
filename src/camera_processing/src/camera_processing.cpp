@@ -9,6 +9,8 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <vector>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -33,6 +35,51 @@ struct ScopedTimer
     }
 };
 
+// These resource reads are Linux-specific, which matches the current target environment.
+static double read_process_cpu_time_ms()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    const double user_time_ms =
+        (static_cast<double>(usage.ru_utime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_utime.tv_usec) / 1000.0);
+    const double system_time_ms =
+        (static_cast<double>(usage.ru_stime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_stime.tv_usec) / 1000.0);
+    return user_time_ms + system_time_ms;
+}
+
+static double read_current_rss_mb()
+{
+    std::ifstream statm_stream("/proc/self/statm");
+    long total_pages = 0;
+    long resident_pages = 0;
+    if (!(statm_stream >> total_pages >> resident_pages))
+    {
+        return 0.0;
+    }
+    (void)total_pages;
+
+    const long page_size_bytes = sysconf(_SC_PAGESIZE);
+    return (static_cast<double>(resident_pages) * static_cast<double>(page_size_bytes)) /
+           (1024.0 * 1024.0);
+}
+
+static double read_peak_rss_mb()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    return static_cast<double>(usage.ru_maxrss) / 1024.0;
+}
+
 class CameraProcessing : public rclcpp::Node
 {
 
@@ -45,6 +92,8 @@ private:
         double publish_time_ms{0.0};
         double overlay_time_ms{0.0};
         double frame_total_time_ms{0.0};
+        double rss_mb{0.0};
+        double peak_rss_mb{0.0};
         std::size_t num_detections{0};
     };
 
@@ -72,7 +121,11 @@ private:
     double interval_sum_publish_ms_{0.0};
     double interval_sum_overlay_ms_{0.0};
     double interval_sum_frame_total_ms_{0.0};
+    double interval_sum_rss_mb_{0.0};
+    double interval_sum_peak_rss_mb_{0.0};
     double interval_sum_num_detections_{0.0};
+    std::chrono::steady_clock::time_point interval_resource_window_start_;
+    double interval_resource_window_cpu_ms_{0.0};
 
     std::uint64_t total_received_frames_{0};
     std::uint64_t total_processed_frames_{0};
@@ -139,6 +192,7 @@ public:
             publish_camera_info_ = false;
         }
         initialize_csv_logging();
+        reset_resource_window();
         RCLCPP_INFO(this->get_logger(), "CameraProcessing node has been initialized.");
     }
 
@@ -216,6 +270,8 @@ public:
 
             total_processed_frames_++;
             metrics.num_detections = detections.size();
+            metrics.rss_mb = read_current_rss_mb();
+            metrics.peak_rss_mb = read_peak_rss_mb();
         }
         update_profiling_metrics(metrics);
     }
@@ -444,6 +500,8 @@ public:
         interval_sum_publish_ms_ += metrics.publish_time_ms;
         interval_sum_overlay_ms_ += metrics.overlay_time_ms;
         interval_sum_frame_total_ms_ += metrics.frame_total_time_ms;
+        interval_sum_rss_mb_ += metrics.rss_mb;
+        interval_sum_peak_rss_mb_ += metrics.peak_rss_mb;
         interval_sum_num_detections_ += metrics.num_detections;
         interval_frame_count_++;
         if (interval_frame_count_ >= profiling_interval_frames_)
@@ -455,7 +513,12 @@ public:
             double avg_publish_time = interval_sum_publish_ms_ / interval_frame_count_;
             double avg_overlay_time = interval_sum_overlay_ms_ / interval_frame_count_;
             double avg_frame_total_time = interval_sum_frame_total_ms_ / interval_frame_count_;
+            double avg_rss_mb = interval_sum_rss_mb_ / interval_frame_count_;
+            double avg_peak_rss_mb = interval_sum_peak_rss_mb_ / interval_frame_count_;
             double avg_num_detections = interval_sum_num_detections_ / interval_frame_count_;
+            double avg_process_cpu_percent = 0.0;
+            double effective_output_rate_hz = 0.0;
+            compute_interval_resource_metrics(avg_process_cpu_percent, effective_output_rate_hz);
 
             write_csv_interval_metrics(
                 interval_frame_count_,
@@ -465,6 +528,10 @@ public:
                 avg_publish_time,
                 avg_overlay_time,
                 avg_frame_total_time,
+                avg_process_cpu_percent,
+                effective_output_rate_hz,
+                avg_rss_mb,
+                avg_peak_rss_mb,
                 avg_num_detections);
 
             // RCLCPP_INFO(this->get_logger(), "Average Frame processing metrics over last %d frames: Buffer Age: %.2f ms, Conversion Time: %.2f ms, Inference Time: %.2f ms, Publish Time: %.2f ms, Overlay Time: %.2f ms, Frame Total Time: %.2f ms, Average Number of Detections: %0.2f, Total Received Frames: %ld, Total Processed Frames: %ld, Total Overwritten Frames: %ld",
@@ -488,6 +555,8 @@ public:
             interval_sum_publish_ms_ = 0.0;
             interval_sum_overlay_ms_ = 0.0;
             interval_sum_frame_total_ms_ = 0.0;
+            interval_sum_rss_mb_ = 0.0;
+            interval_sum_peak_rss_mb_ = 0.0;
             interval_sum_num_detections_ = 0.0;
         }
     }
@@ -513,7 +582,7 @@ public:
                 return;
             }
 
-            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_inference_time_ms,avg_publish_time_ms,avg_overlay_time_ms,avg_frame_total_time_ms,avg_num_detections,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_inference_time_ms,avg_publish_time_ms,avg_overlay_time_ms,avg_frame_total_time_ms,avg_process_cpu_percent,effective_output_rate_hz,avg_rss_mb,avg_peak_rss_mb,avg_num_detections,total_received_frames,total_processed_frames,total_overwritten_frames\n";
             csv_log_stream_.flush();
             RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
         }
@@ -532,6 +601,10 @@ public:
         double avg_publish_time,
         double avg_overlay_time,
         double avg_frame_total_time,
+        double avg_process_cpu_percent,
+        double effective_output_rate_hz,
+        double avg_rss_mb,
+        double avg_peak_rss_mb,
         double avg_num_detections)
     {
         if (!csv_logging_ || !csv_log_stream_.is_open())
@@ -549,6 +622,10 @@ public:
                         << avg_publish_time << ','
                         << avg_overlay_time << ','
                         << avg_frame_total_time << ','
+                        << avg_process_cpu_percent << ','
+                        << effective_output_rate_hz << ','
+                        << avg_rss_mb << ','
+                        << avg_peak_rss_mb << ','
                         << avg_num_detections << ','
                         << total_received_frames_ << ','
                         << total_processed_frames_ << ','
@@ -590,6 +667,34 @@ public:
             }
         }
         return value;
+    }
+
+    void reset_resource_window()
+    {
+        interval_resource_window_start_ = std::chrono::steady_clock::now();
+        interval_resource_window_cpu_ms_ = read_process_cpu_time_ms();
+    }
+
+    void compute_interval_resource_metrics(
+        double &avg_process_cpu_percent,
+        double &effective_output_rate_hz)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_wall_ms =
+            std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                now - interval_resource_window_start_)
+                .count();
+        const double current_cpu_ms = read_process_cpu_time_ms();
+        const double elapsed_cpu_ms =
+            std::max(0.0, current_cpu_ms - interval_resource_window_cpu_ms_);
+
+        avg_process_cpu_percent =
+            elapsed_wall_ms > 0.0 ? (100.0 * elapsed_cpu_ms / elapsed_wall_ms) : 0.0;
+        effective_output_rate_hz =
+            elapsed_wall_ms > 0.0 ? (1000.0 * static_cast<double>(interval_frame_count_) / elapsed_wall_ms) : 0.0;
+
+        interval_resource_window_start_ = now;
+        interval_resource_window_cpu_ms_ = current_cpu_ms;
     }
 };
 

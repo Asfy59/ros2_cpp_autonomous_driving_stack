@@ -1,0 +1,52 @@
+
+
+lidar_processing:
+  ros__parameters:
+    processing_rate: 10.0
+    crop_box_min: [-10.0, -20.0, -2.0]
+    crop_box_max: [30.0, 20.0, 2.0]
+    voxel_leaf_size: [0.1, 0.1, 0.1]
+    publish_processed_lidar_pc: true
+    enable_ground_segmentation: true
+    cluster_tolerance_m: 0.75
+    min_cluster_points: 5
+    max_cluster_points: 5000
+    min_cluster_size: [0.2, 0.2, 0.2]
+    max_cluster_size: [15.0, 8.0, 5.0]
+    profiling_interval_frames: 60
+    enable_csv_logging: true
+    csv_log_dir: "csv_logs/lidar_processing"
+
+camera_processing:
+  ros__parameters:
+    processing_rate: 10.0
+    model_path: "models/yolo/yolov8n.onnx"
+    publish_overlay_image: true
+    publish_camera_info: true
+    profiling_interval_frames: 60
+    enable_csv_logging: true
+    csv_log_dir: "csv_logs/camera_processing"
+    camera_name: "p2"
+
+fusion_core:
+  ros__parameters:
+    lidar_detections_topic: "lidar_detections"
+    camera_detections_topic: "object_detections"
+    camera_image_topic: "/p2_img"
+    camera_info_topic: "p2_camera_info"
+    tracked_objects_topic: "tracked_objects"
+    decision_state_topic: "decision_state"
+    fusion_overlay_topic: "fusion_overlay_image"
+    camera_sync_tolerance_ms: 100.0
+    match_iou_threshold: 0.10
+    max_match_center_distance_px: 160.0
+    tf_lookup_timeout_ms: 100.0
+    min_projection_depth_m: 0.10
+    stop_distance_m: 6.0
+    slow_distance_m: 12.0
+    decision_lateral_gate_m: 2.5
+    camera_history_size: 30
+    profiling_interval_frames: 60
+    publish_overlay_image: true
+    enable_csv_logging: true
+    csv_log_dir: "csv_logs/fusion_core"

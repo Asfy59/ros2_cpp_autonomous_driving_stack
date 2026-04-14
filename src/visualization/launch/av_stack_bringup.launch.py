@@ -12,6 +12,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description() -> LaunchDescription:
     dataset_path = LaunchConfiguration("dataset_path")
     dataset_number = LaunchConfiguration("dataset_number")
+    stack_config_path = LaunchConfiguration("stack_config_path")
     start_time = LaunchConfiguration("start_time")
     end_time = LaunchConfiguration("end_time")
     enable_camera_csv_logging = LaunchConfiguration("enable_camera_csv_logging")
@@ -44,6 +45,13 @@ def generate_launch_description() -> LaunchDescription:
                 "dataset_number",
                 default_value="00",
                 description="KITTI odometry sequence number to replay",
+            ),
+            DeclareLaunchArgument(
+                "stack_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("visualization"), "config", "av_stack_nodes.yaml"]
+                ),
+                description="YAML file with the node parameter set for the current stack run",
             ),
             DeclareLaunchArgument(
                 "start_time",
@@ -157,17 +165,7 @@ def generate_launch_description() -> LaunchDescription:
                     ("lidar_detection_markers", "lidar_detection_markers")
                 ],
                 parameters=[
-                    {"processing_rate": 10.0},
-                    {"crop_box_min": [-10.0, -20.0, -2.0]},
-                    {"crop_box_max": [30.0, 20.0, 2.0]},
-                    {"voxel_leaf_size": [0.1, 0.1, 0.1]},
-                    {"publish_processed_lidar_pc": True},
-                    {"enable_ground_segmentation": True},
-                    {"cluster_tolerance_m": 0.75},
-                    {"min_cluster_points": 5},
-                    {"max_cluster_points": 5000},
-                    {"min_cluster_size": [0.2, 0.2, 0.2]},
-                    {"max_cluster_size": [15.0, 8.0, 5.0]},
+                    stack_config_path,
                     {"enable_csv_logging": enable_lidar_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
@@ -182,14 +180,10 @@ def generate_launch_description() -> LaunchDescription:
                     ("camera_info", "p2_camera_info"),
                 ],
                 parameters=[
-                    {"processing_rate": 10.0},
-                    {"model_path": "models/yolo/yolov8n.onnx"},
-                    {"publish_overlay_image": True},
-                    {"publish_camera_info": True},
+                    stack_config_path,
                     {"dataset_path": ParameterValue(dataset_path, value_type=str)},
                     {"enable_csv_logging": enable_camera_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
-                    {"camera_name": "p2"},
                 ],
             ),
             Node(
@@ -197,17 +191,7 @@ def generate_launch_description() -> LaunchDescription:
                 name="fusion_core",
                 executable='fusion_core',
                 parameters=[
-                    {"lidar_detections_topic": "lidar_detections"},
-                    {"camera_detections_topic": "object_detections"},
-                    {"camera_info_topic": "p2_camera_info"},
-                    {"tracked_objects_topic": "tracked_objects"},
-                    {"decision_state_topic": "decision_state"},
-                    {"camera_sync_tolerance_ms": 100.0},
-                    {"match_iou_threshold": 0.10},
-                    {"max_match_center_distance_px": 160.0},
-                    {"stop_distance_m": 6.0},
-                    {"slow_distance_m": 12.0},
-                    {"decision_lateral_gate_m": 2.5},
+                    stack_config_path,
                     {"enable_csv_logging": enable_fusion_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],

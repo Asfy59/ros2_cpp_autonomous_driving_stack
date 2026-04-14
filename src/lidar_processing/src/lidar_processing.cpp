@@ -9,6 +9,8 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include "vision_msgs/msg/detection3_d.hpp"
 #include "vision_msgs/msg/detection3_d_array.hpp"
@@ -43,22 +45,67 @@ struct ScopedTimer
     }
 };
 
+// These process stats are Linux-specific, which is okay for the current deployment target.
+static double read_process_cpu_time_ms()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    const double user_time_ms =
+        (static_cast<double>(usage.ru_utime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_utime.tv_usec) / 1000.0);
+    const double system_time_ms =
+        (static_cast<double>(usage.ru_stime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_stime.tv_usec) / 1000.0);
+    return user_time_ms + system_time_ms;
+}
+
+static double read_current_rss_mb()
+{
+    std::ifstream statm_stream("/proc/self/statm");
+    long total_pages = 0;
+    long resident_pages = 0;
+    if (!(statm_stream >> total_pages >> resident_pages))
+    {
+        return 0.0;
+    }
+    (void)total_pages;
+
+    const long page_size_bytes = sysconf(_SC_PAGESIZE);
+    return (static_cast<double>(resident_pages) * static_cast<double>(page_size_bytes)) /
+           (1024.0 * 1024.0);
+}
+
+static double read_peak_rss_mb()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    return static_cast<double>(usage.ru_maxrss) / 1024.0;
+}
+
 class LidarProcessing : public rclcpp::Node
 {
 public:
     LidarProcessing() : Node("lidar_processing")
     {
-        this->declare_parameter<double>("processing_rate", 10.0);
-        this->declare_parameter<std::vector<double>>("crop_box_min", {-5.0, -15.0, -2.0});
-        this->declare_parameter<std::vector<double>>("crop_box_max", {30.0, 15.0, 2.0});
+        this->declare_parameter<double>("processing_rate", 15.0);
+        this->declare_parameter<std::vector<double>>("crop_box_min", {-5.0, -10.0, -2.0});
+        this->declare_parameter<std::vector<double>>("crop_box_max", {30.0, 10.0, 2.0});
         this->declare_parameter<std::vector<double>>("voxel_leaf_size", {0.1, 0.1, 0.1});
         this->declare_parameter<bool>("publish_processed_lidar_pc", true);
         this->declare_parameter<bool>("enable_ground_segmentation", true);
         this->declare_parameter<double>("cluster_tolerance_m", 0.75);
-        this->declare_parameter<int>("min_cluster_points", 5);
+        this->declare_parameter<int>("min_cluster_points", 30);
         this->declare_parameter<int>("max_cluster_points", 5000);
         this->declare_parameter<std::vector<double>>("min_cluster_size", {0.2, 0.2, 0.2});
-        this->declare_parameter<std::vector<double>>("max_cluster_size", {15.0, 8.0, 5.0});
+        this->declare_parameter<std::vector<double>>("max_cluster_size", {15.0, 10.0, 5.0});
         this->declare_parameter<int>("profiling_interval_frames", 60);
         this->declare_parameter<bool>("enable_csv_logging", false);
         this->declare_parameter<std::string>("csv_log_dir", "csv_logs/lidar_processing");
@@ -107,6 +154,7 @@ public:
             10);
 
         initialize_csv_logging();
+        reset_resource_window();
         RCLCPP_INFO(this->get_logger(), "LidarProcessing node has been initialized.");
 
     }
@@ -236,6 +284,8 @@ public:
             metrics.raw_clusters = raw_clusters.size();
             metrics.filtered_clusters = obstacle_clusters.size();
             metrics.output_detections = detection_array.detections.size();
+            metrics.rss_mb = read_current_rss_mb();
+            metrics.peak_rss_mb = read_peak_rss_mb();
 
             total_processed_frames_++;
         }
@@ -575,6 +625,8 @@ private:
         double detection_publish_time_ms{0.0};
         double marker_publish_time_ms{0.0};
         double frame_total_time_ms{0.0};
+        double rss_mb{0.0};
+        double peak_rss_mb{0.0};
         std::size_t input_points{0};
         std::size_t output_points{0};
         std::size_t raw_clusters{0};
@@ -599,6 +651,8 @@ private:
         interval_sum_detection_publish_ms_ += metrics.detection_publish_time_ms;
         interval_sum_marker_publish_ms_ += metrics.marker_publish_time_ms;
         interval_sum_frame_total_ms_ += metrics.frame_total_time_ms;
+        interval_sum_rss_mb_ += metrics.rss_mb;
+        interval_sum_peak_rss_mb_ += metrics.peak_rss_mb;
         interval_sum_input_points_ += metrics.input_points;
         interval_sum_output_points_ += metrics.output_points;
         interval_sum_raw_clusters_ += metrics.raw_clusters;
@@ -623,11 +677,16 @@ private:
             const double avg_detection_publish_ms = interval_sum_detection_publish_ms_ / interval_frame_count_;
             const double avg_marker_publish_ms = interval_sum_marker_publish_ms_ / interval_frame_count_;
             const double avg_frame_total_ms = interval_sum_frame_total_ms_ / interval_frame_count_;
+            const double avg_rss_mb = interval_sum_rss_mb_ / interval_frame_count_;
+            const double avg_peak_rss_mb = interval_sum_peak_rss_mb_ / interval_frame_count_;
             const double avg_input_points = interval_sum_input_points_ / interval_frame_count_;
             const double avg_output_points = interval_sum_output_points_ / interval_frame_count_;
             const double avg_raw_clusters = interval_sum_raw_clusters_ / interval_frame_count_;
             const double avg_filtered_clusters = interval_sum_filtered_clusters_ / interval_frame_count_;
             const double avg_output_detections = interval_sum_output_detections_ / interval_frame_count_;
+            double avg_process_cpu_percent = 0.0;
+            double effective_output_rate_hz = 0.0;
+            compute_interval_resource_metrics(avg_process_cpu_percent, effective_output_rate_hz);
 
             write_csv_interval_metrics(
                 interval_frame_count_,
@@ -646,6 +705,10 @@ private:
                 avg_detection_publish_ms,
                 avg_marker_publish_ms,
                 avg_frame_total_ms,
+                avg_process_cpu_percent,
+                effective_output_rate_hz,
+                avg_rss_mb,
+                avg_peak_rss_mb,
                 avg_input_points,
                 avg_output_points,
                 avg_raw_clusters,
@@ -685,6 +748,8 @@ private:
             interval_sum_detection_publish_ms_ = 0.0;
             interval_sum_marker_publish_ms_ = 0.0;
             interval_sum_frame_total_ms_ = 0.0;
+            interval_sum_rss_mb_ = 0.0;
+            interval_sum_peak_rss_mb_ = 0.0;
             interval_sum_input_points_ = 0.0;
             interval_sum_output_points_ = 0.0;
             interval_sum_raw_clusters_ = 0.0;
@@ -714,7 +779,7 @@ private:
                 return;
             }
 
-            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_crop_box_time_ms,avg_voxelization_time_ms,avg_ground_segmentation_time_ms,avg_clustering_time_ms,avg_cluster_filtering_time_ms,avg_bounding_box_time_ms,avg_detection_conversion_time_ms,avg_marker_conversion_time_ms,avg_publish_time_ms,avg_processed_cloud_publish_time_ms,avg_detection_publish_time_ms,avg_marker_publish_time_ms,avg_frame_total_time_ms,avg_input_points,avg_output_points,avg_raw_clusters,avg_filtered_clusters,avg_output_detections,total_received_frames,total_processed_frames,total_overwritten_frames\n";
+            csv_log_stream_ << "timestamp_utc,dataset_sequence,interval_frames,avg_buffer_age_ms,avg_conversion_time_ms,avg_crop_box_time_ms,avg_voxelization_time_ms,avg_ground_segmentation_time_ms,avg_clustering_time_ms,avg_cluster_filtering_time_ms,avg_bounding_box_time_ms,avg_detection_conversion_time_ms,avg_marker_conversion_time_ms,avg_publish_time_ms,avg_processed_cloud_publish_time_ms,avg_detection_publish_time_ms,avg_marker_publish_time_ms,avg_frame_total_time_ms,avg_process_cpu_percent,effective_output_rate_hz,avg_rss_mb,avg_peak_rss_mb,avg_input_points,avg_output_points,avg_raw_clusters,avg_filtered_clusters,avg_output_detections,total_received_frames,total_processed_frames,total_overwritten_frames\n";
             csv_log_stream_.flush();
             RCLCPP_INFO(this->get_logger(), "CSV logging enabled. Writing interval metrics to '%s'.", csv_log_file_path_.c_str());
         }
@@ -742,6 +807,10 @@ private:
         double avg_detection_publish_ms,
         double avg_marker_publish_ms,
         double avg_frame_total_ms,
+        double avg_process_cpu_percent,
+        double effective_output_rate_hz,
+        double avg_rss_mb,
+        double avg_peak_rss_mb,
         double avg_input_points,
         double avg_output_points,
         double avg_raw_clusters,
@@ -772,6 +841,10 @@ private:
                         << avg_detection_publish_ms << ','
                         << avg_marker_publish_ms << ','
                         << avg_frame_total_ms << ','
+                        << avg_process_cpu_percent << ','
+                        << effective_output_rate_hz << ','
+                        << avg_rss_mb << ','
+                        << avg_peak_rss_mb << ','
                         << avg_input_points << ','
                         << avg_output_points << ','
                         << avg_raw_clusters << ','
@@ -819,6 +892,34 @@ private:
         return value;
     }
 
+    void reset_resource_window()
+    {
+        interval_resource_window_start_ = std::chrono::steady_clock::now();
+        interval_resource_window_cpu_ms_ = read_process_cpu_time_ms();
+    }
+
+    void compute_interval_resource_metrics(
+        double &avg_process_cpu_percent,
+        double &effective_output_rate_hz)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_wall_ms =
+            std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                now - interval_resource_window_start_)
+                .count();
+        const double current_cpu_ms = read_process_cpu_time_ms();
+        const double elapsed_cpu_ms =
+            std::max(0.0, current_cpu_ms - interval_resource_window_cpu_ms_);
+
+        avg_process_cpu_percent =
+            elapsed_wall_ms > 0.0 ? (100.0 * elapsed_cpu_ms / elapsed_wall_ms) : 0.0;
+        effective_output_rate_hz =
+            elapsed_wall_ms > 0.0 ? (1000.0 * static_cast<double>(interval_frame_count_) / elapsed_wall_ms) : 0.0;
+
+        interval_resource_window_start_ = now;
+        interval_resource_window_cpu_ms_ = current_cpu_ms;
+    }
+
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_subscription_;
     sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud_;
     std::chrono::steady_clock::time_point latest_cloud_received_steady_;
@@ -860,11 +961,15 @@ private:
     double interval_sum_detection_publish_ms_{0.0};
     double interval_sum_marker_publish_ms_{0.0};
     double interval_sum_frame_total_ms_{0.0};
+    double interval_sum_rss_mb_{0.0};
+    double interval_sum_peak_rss_mb_{0.0};
     double interval_sum_input_points_{0.0};
     double interval_sum_output_points_{0.0};
     double interval_sum_raw_clusters_{0.0};
     double interval_sum_filtered_clusters_{0.0};
     double interval_sum_output_detections_{0.0};
+    std::chrono::steady_clock::time_point interval_resource_window_start_;
+    double interval_resource_window_cpu_ms_{0.0};
     std::uint64_t total_received_frames_{0};
     std::uint64_t total_processed_frames_{0};
     std::uint64_t total_overwritten_frames_{0};
