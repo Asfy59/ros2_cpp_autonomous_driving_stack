@@ -4,7 +4,7 @@
   <name>fusion_core</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="asfandyar.khan@highcat.io">asfy</maintainer>
+  <maintainer email="durraniasfand@hotmail.com">Asfy59</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
