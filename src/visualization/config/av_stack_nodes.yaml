@@ -1,56 +1,87 @@
 
-
 lidar_processing:
   ros__parameters:
-    processing_rate: 10.0
-    input_queue_size: 3
-    max_buffer_age_ms: 300.0
-    crop_box_min: [0.0, -15.0, -2.0]
-    crop_box_max: [30.0, 15.0, 2.0]
-    voxel_leaf_size: [0.15, 0.15, 0.15]
-    publish_processed_lidar_pc: true
-    enable_ground_segmentation: true
-    cluster_tolerance_m: 0.75
-    min_cluster_points: 5
-    max_cluster_points: 5000
-    min_cluster_size: [0.4, 0.4, 0.4]
-    max_cluster_size: [15.0, 8.0, 5.0]
-    profiling_interval_frames: 60
-    enable_csv_logging: true
-    csv_log_dir: "csv_logs/lidar_processing"
+    processing_rate: 10.0  # Processing loop frequency in Hz.
+    input_queue_size: 3  # Number of incoming point clouds buffered before older frames are dropped.
+    max_buffer_age_ms: 300.0  # Maximum age of a buffered point cloud before it is discarded.
+    crop_box_min: [0.0, -7.0, -2.0]  # Minimum XYZ corner of the spatial crop region in meters.
+    crop_box_max: [25.0, 7.0, 2.0]  # Maximum XYZ corner of the spatial crop region in meters.
+    voxel_leaf_size: [0.15, 0.15, 0.15]  # Voxel size used to downsample the cropped point cloud before ground removal and clustering.
+    publish_processed_lidar_pc: true  # Whether to publish the processed LiDAR point cloud.
+    enable_ground_segmentation: true  # Whether to remove the ground plane before clustering.
+    min_cluster_points: 10  # Minimum number of points required for a clustered obstacle to be kept.
+    max_cluster_points: 5000  # Maximum number of points allowed for a clustered obstacle to be kept.
+    min_cluster_size: [0.4, 0.4, 0.4]  # Minimum oriented box size [length, width, height] in meters for valid clusters.
+    max_cluster_size: [10.0, 8.0, 3.0]  # Maximum oriented box size [length, width, height] in meters for valid clusters.
+    processing_timer_fallback_period_ms: 100  # Fallback timer period used when processing_rate is invalid or non-positive.
+    lidar_input_qos_depth: 10  # ROS subscription queue depth for the input LiDAR topic.
+    processed_cloud_qos_depth: 10  # ROS publisher queue depth for the processed point cloud topic.
+    detection_qos_depth: 10  # ROS publisher queue depth for the 3D detections topic.
+    marker_qos_depth: 10  # ROS publisher queue depth for the marker topic.
+    ground_segmentation_distance_threshold_m: 0.33  # Maximum point-to-plane distance for RANSAC ground inliers, in meters.
+    ground_segmentation_max_iterations: 100  # Maximum number of RANSAC iterations used for ground segmentation.
+    ground_segmentation_axis: [0.0, 0.0, 1.0]  # Preferred ground normal axis used by the RANSAC plane fitter.
+    ground_segmentation_eps_angle_deg: 10.0  # Maximum angular deviation from the ground axis, in degrees.
+    clustering_voxel_leaf_size: [0.3, 0.3, 0.3]  # Voxel size used for the voxel-connectivity clustering stage.
+    enable_range_adaptive_clustering: true  # Whether clustering tolerance should change with distance from the sensor.
+    clustering_range_breakpoints_m: [10.0, 20.0]  # Range band boundaries in meters for adaptive clustering tolerance.
+    clustering_tolerance_by_range_m: [1.0, 1.0, 1.4]  # Cluster connection tolerances in meters for each range band.
+    marker_min_dimension_m: 0.05  # Minimum marker cube dimension used to keep very small boxes visible in RViz.
+    marker_color_rgba: [0.0, 1.0, 0.0, 0.25]  # Marker color in RGBA format for LiDAR detection visualization.
+    marker_lifetime_sec: 0.0  # Marker lifetime in seconds; 0.0 means markers persist until replaced.
+    marker_namespace: "lidar_detection_boxes"  # Marker namespace used to group LiDAR detection markers in RViz.
+    profiling_interval_frames: 60  # Number of processed frames per profiling/logging interval.
+    enable_csv_logging: true  # Whether to write interval performance metrics to CSV.
+    csv_log_dir: "csv_logs/lidar_processing"  # Directory where LiDAR profiling CSV logs are written.
 
 camera_processing:
   ros__parameters:
-    processing_rate: 10.0
-    input_queue_size: 4
-    max_buffer_age_ms: 300.0
-    model_path: "models/yolo/yolov8n.onnx"
-    publish_overlay_image: true
-    publish_camera_info: true
-    profiling_interval_frames: 60
-    enable_csv_logging: true
-    csv_log_dir: "csv_logs/camera_processing"
-    camera_name: "p2"
+    processing_rate: 10.0  # Processing loop frequency in Hz.
+    input_queue_size: 4  # Number of incoming camera frames buffered before older frames are dropped.
+    max_buffer_age_ms: 300.0  # Maximum age of a buffered frame before it is discarded.
+    model_path: "models/yolo/yolov8n.onnx"  # Path to the ONNX object detection model.
+    publish_overlay_image: true  # Whether to publish the camera overlay image with detections.
+    publish_camera_info: true  # Whether to publish the camera_info topic from this node.
+    profiling_interval_frames: 60  # Number of processed frames per profiling/logging interval.
+    enable_csv_logging: true  # Whether to write interval performance metrics to CSV.
+    csv_log_dir: "csv_logs/camera_processing"  # Directory where camera profiling CSV logs are written.
+    camera_name: "p2"  # Camera name used for topic naming and calibration lookup.
 
 fusion_core:
   ros__parameters:
-    lidar_detections_topic: "lidar_detections"
-    camera_detections_topic: "object_detections"
-    camera_image_topic: "/p2_img"
-    camera_info_topic: "p2_camera_info"
-    tracked_objects_topic: "tracked_objects"
-    decision_state_topic: "decision_state"
-    fusion_overlay_topic: "fusion_overlay_image"
-    camera_sync_tolerance_ms: 200.0
-    match_iou_threshold: 0.10
-    max_match_center_distance_px: 160.0
-    tf_lookup_timeout_ms: 100.0
-    min_projection_depth_m: 0.10
-    stop_distance_m: 6.0
-    slow_distance_m: 12.0
-    decision_lateral_gate_m: 2.5
-    camera_history_size: 10
-    profiling_interval_frames: 60
-    publish_overlay_image: true
-    enable_csv_logging: true
-    csv_log_dir: "csv_logs/fusion_core"
+    lidar_detections_topic: "lidar_detections"  # Input topic carrying LiDAR 3D detections.
+    camera_detections_topic: "object_detections"  # Input topic carrying camera 2D detections.
+    camera_image_topic: "/p2_img"  # Input topic carrying the camera image used for projection and overlay.
+    camera_info_topic: "p2_camera_info"  # Input topic carrying the camera calibration data.
+    tracking_frame: "map"  # Stable world frame used internally by the tracker for prediction and association.
+    tracked_objects_topic: "tracked_objects"  # Output topic carrying fused or tracked objects.
+    tracked_object_markers_topic: "tracked_object_markers"  # Output topic carrying RViz markers for tracked objects.
+    decision_state_topic: "decision_state"  # Output topic carrying the current driving decision state.
+    fusion_overlay_topic: "fusion_overlay_image"  # Output topic carrying the fusion overlay visualization.
+    camera_sync_tolerance_ms: 200.0  # Maximum timestamp mismatch allowed between camera and LiDAR inputs.
+    match_iou_threshold: 0.10  # Minimum IoU required to match projected LiDAR and camera detections.
+    max_match_center_distance_px: 160.0  # Maximum allowed center distance in pixels for a LiDAR or camera match.
+    tf_lookup_timeout_ms: 100.0  # Timeout for TF lookups used during projection and fusion.
+    min_projection_depth_m: 0.10  # Minimum positive depth in meters for projected 3D points.
+    stop_distance_m: 6.0  # Distance threshold in meters for issuing a stop decision.
+    slow_distance_m: 12.0  # Distance threshold in meters for issuing a slow-down decision.
+    decision_lateral_gate_m: 2.5  # Lateral distance gate in meters for objects considered in the ego path.
+    camera_history_size: 10  # Number of recent camera frames retained for temporal matching.
+    max_active_tracks: 128  # Hard upper bound on active tracker states to prevent runaway duplicate-track growth.
+    lidar_association_distance_gate_m: 2.0  # Maximum planar distance in meters allowed for LiDAR track-to-detection association.
+    initial_existence_probability: 0.55  # Initial existence score assigned to a newly created track.
+    existence_probability_hit_gain: 0.20  # Existence score increase applied when a track is updated by LiDAR.
+    existence_probability_miss_decay: 0.15  # Existence score decrease applied when a track misses a LiDAR update.
+    track_confirmation_threshold: 0.75  # Existence score required for a track to become confirmed.
+    track_deletion_threshold: 0.20  # Existence score below which a track is deleted.
+    process_noise_position_variance_per_s2: 0.25  # Position process-noise variance growth used during prediction.
+    process_noise_velocity_variance_per_s: 1.0  # Velocity process-noise variance growth used during prediction.
+    process_noise_yaw_variance_per_s: 0.04  # Yaw process-noise variance growth used during prediction.
+    process_noise_size_variance_per_s: 0.05  # Length and width process-noise variance growth used during prediction.
+    lidar_measurement_noise_position_variance: 0.25  # LiDAR position measurement variance used in the EKF update.
+    lidar_measurement_noise_yaw_variance: 0.09  # LiDAR yaw measurement variance used in the EKF update.
+    lidar_measurement_noise_size_variance: 0.5  # LiDAR length and width measurement variance used in the EKF update.
+    profiling_interval_frames: 60  # Number of processed frames per profiling or logging interval.
+    publish_overlay_image: true  # Whether to publish the fusion overlay image.
+    enable_csv_logging: true  # Whether to write interval performance metrics to CSV.
+    csv_log_dir: "csv_logs/fusion_core"  # Directory where fusion profiling CSV logs are written.

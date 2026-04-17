@@ -17,6 +17,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -35,6 +36,7 @@ ament_target_dependencies(
   tf2
   tf2_geometry_msgs
   tf2_ros
+  visualization_msgs
   vision_msgs)
 
 ament_target_dependencies(
@@ -49,6 +51,7 @@ ament_target_dependencies(
   tf2
   tf2_geometry_msgs
   tf2_ros
+  visualization_msgs
   vision_msgs)
 
 target_include_directories(fusion_core PUBLIC ${OpenCV_INCLUDE_DIRS})

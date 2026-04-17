@@ -7,7 +7,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
-from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
 def generate_launch_description() -> LaunchDescription:
     dataset_path = LaunchConfiguration("dataset_path")
@@ -28,6 +28,7 @@ def generate_launch_description() -> LaunchDescription:
     odometry_plugin = LaunchConfiguration("odometry_plugin")
     odometry_config_path = LaunchConfiguration("odometry_config_path")
     vehicle_sensor_link = LaunchConfiguration("vehicle_sensor_link")
+    stack_parameters = ParameterFile(stack_config_path, allow_substs=True)
 
     replayer_launch = PathJoinSubstitution(
         [FindPackageShare("ros2_kitti_replay"), "launch", "replayer_bringup.launch.py"]
@@ -165,7 +166,7 @@ def generate_launch_description() -> LaunchDescription:
                     ("lidar_detection_markers", "lidar_detection_markers")
                 ],
                 parameters=[
-                    stack_config_path,
+                    stack_parameters,
                     {"enable_csv_logging": enable_lidar_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
@@ -180,7 +181,7 @@ def generate_launch_description() -> LaunchDescription:
                     ("camera_info", "p2_camera_info"),
                 ],
                 parameters=[
-                    stack_config_path,
+                    stack_parameters,
                     {"dataset_path": ParameterValue(dataset_path, value_type=str)},
                     {"enable_csv_logging": enable_camera_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
@@ -189,9 +190,9 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package='fusion_core',
                 name="fusion_core",
-                executable='fusion_core',
+                executable='tracking_based_fusion',
                 parameters=[
-                    stack_config_path,
+                    stack_parameters,
                     {"enable_csv_logging": enable_fusion_csv_logging},
                     {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
