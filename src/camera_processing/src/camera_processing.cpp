@@ -83,6 +83,8 @@ static double read_peak_rss_mb()
 
 class CameraProcessing : public rclcpp::Node
 {
+    static constexpr std::size_t kSensorImageQosDepth{5};
+    static constexpr std::size_t kSemanticOutputQosDepth{5};
 
 private:
     struct FrameProcessingMetrics
@@ -174,29 +176,36 @@ public:
         input_queue_size_ = std::max(1, static_cast<int>(this->get_parameter("input_queue_size").as_int()));
         max_buffer_age_ms_ = std::max(0.0, this->get_parameter("max_buffer_age_ms").as_double());
 
+        const auto camera_image_qos =
+            rclcpp::SensorDataQoS().keep_last(kSensorImageQosDepth);
+        const auto semantic_output_qos =
+            rclcpp::QoS(rclcpp::KeepLast(kSemanticOutputQosDepth))
+                .reliable()
+                .durability_volatile();
+
         processing_timer_ = this->create_wall_timer(
             processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
             std::bind(&CameraProcessing::process_latest_image, this));
         camera_image_subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
             "camera_in",
-            10,
+            camera_image_qos,
             std::bind(&CameraProcessing::camera_image_subscriber_callback, this, std::placeholders::_1));
 
         yolo_detector_ = std::make_unique<YoloDetector>(model_path_);
         object_bbox_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>(
             "object_detections",
-            10);
+            semantic_output_qos);
         if (publish_overlay_image_)
         {
             overlay_image_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
                 "overlay_image",
-                10);
+                semantic_output_qos);
         }
         if (publish_camera_info_ && load_camera_info_template())
         {
             camera_info_publisher_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
                 "camera_info",
-                10);
+                semantic_output_qos);
         }
         else
         {

@@ -86,6 +86,9 @@
 class TrackingBasedFusion final : public rclcpp::Node
 {
 public:
+    static constexpr std::size_t kSensorImageQosDepth{5};
+    static constexpr std::size_t kSemanticQosDepth{5};
+
     TrackingBasedFusion()
         : rclcpp::Node("tracking_based_fusion"),
           tf_buffer_(this->get_clock()),
@@ -182,40 +185,47 @@ public:
         lidar_measurement_noise_yaw_variance_ = std::max(1e-6, lidar_measurement_noise_yaw_variance_);
         lidar_measurement_noise_size_variance_ = std::max(1e-6, lidar_measurement_noise_size_variance_);
 
+        const auto semantic_qos =
+            rclcpp::QoS(rclcpp::KeepLast(kSemanticQosDepth))
+                .reliable()
+                .durability_volatile();
+        const auto camera_image_qos =
+            rclcpp::SensorDataQoS().keep_last(kSensorImageQosDepth);
+
         lidar_detections_subscription_ =
             this->create_subscription<vision_msgs::msg::Detection3DArray>(
                 lidar_detections_topic,
-                10,
+                semantic_qos,
                 std::bind(&TrackingBasedFusion::lidar_detections_callback, this, std::placeholders::_1));
 
         camera_detections_subscription_ =
             this->create_subscription<vision_msgs::msg::Detection2DArray>(
                 camera_detections_topic,
-                10,
+                semantic_qos,
                 std::bind(&TrackingBasedFusion::camera_detections_callback, this, std::placeholders::_1));
 
         camera_info_subscription_ =
             this->create_subscription<sensor_msgs::msg::CameraInfo>(
                 camera_info_topic,
-                10,
+                semantic_qos,
                 std::bind(&TrackingBasedFusion::camera_info_callback, this, std::placeholders::_1));
 
         camera_image_subscription_ =
             this->create_subscription<sensor_msgs::msg::Image>(
                 camera_image_topic,
-                10,
+                camera_image_qos,
                 std::bind(&TrackingBasedFusion::camera_image_callback, this, std::placeholders::_1));
 
         tracked_objects_publisher_ =
-            this->create_publisher<auto_stack_msgs::msg::TrackedObjectArray>(tracked_objects_topic, 10);
+            this->create_publisher<auto_stack_msgs::msg::TrackedObjectArray>(tracked_objects_topic, semantic_qos);
         decision_state_publisher_ =
-            this->create_publisher<auto_stack_msgs::msg::DecisionState>(decision_state_topic, 10);
+            this->create_publisher<auto_stack_msgs::msg::DecisionState>(decision_state_topic, semantic_qos);
         tracked_object_markers_publisher_ =
-            this->create_publisher<visualization_msgs::msg::MarkerArray>(tracked_object_markers_topic, 10);
+            this->create_publisher<visualization_msgs::msg::MarkerArray>(tracked_object_markers_topic, semantic_qos);
         if (publish_overlay_image_)
         {
             fusion_overlay_publisher_ =
-                this->create_publisher<sensor_msgs::msg::Image>(fusion_overlay_topic, 10);
+                this->create_publisher<sensor_msgs::msg::Image>(fusion_overlay_topic, semantic_qos);
         }
 
         RCLCPP_INFO(

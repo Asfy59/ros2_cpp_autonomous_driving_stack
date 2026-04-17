@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <deque>
@@ -10,24 +11,25 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Geometry>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include "vision_msgs/msg/detection3_d.hpp"
 #include "vision_msgs/msg/detection3_d_array.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
-#include <pcl/search/kdtree.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h>
-#include <pcl/segmentation/extract_clusters.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/common/angles.h>
-#include <pcl/common/common.h>
+#include <pcl/common/centroid.h>
 
 struct ScopedTimer
 {
@@ -102,13 +104,12 @@ public:
 
     LidarProcessing() : Node("lidar_processing")
     {
-        this->declare_parameter<double>("processing_rate", 15.0);
+        this->declare_parameter<double>("processing_rate", 10.0);
         this->declare_parameter<std::vector<double>>("crop_box_min", {-5.0, -10.0, -2.0});
         this->declare_parameter<std::vector<double>>("crop_box_max", {30.0, 10.0, 2.0});
         this->declare_parameter<std::vector<double>>("voxel_leaf_size", {0.1, 0.1, 0.1});
         this->declare_parameter<bool>("publish_processed_lidar_pc", true);
         this->declare_parameter<bool>("enable_ground_segmentation", true);
-        this->declare_parameter<double>("cluster_tolerance_m", 0.75);
         this->declare_parameter<int>("min_cluster_points", 30);
         this->declare_parameter<int>("max_cluster_points", 5000);
         this->declare_parameter<std::vector<double>>("min_cluster_size", {0.2, 0.2, 0.2});
@@ -119,6 +120,23 @@ public:
         this->declare_parameter<std::string>("dataset_sequence", "unknown");
         this->declare_parameter<int>("input_queue_size", 3);
         this->declare_parameter<double>("max_buffer_age_ms", 300.0);
+        this->declare_parameter<int>("processing_timer_fallback_period_ms", 100);
+        this->declare_parameter<int>("lidar_input_qos_depth", 5);
+        this->declare_parameter<int>("processed_cloud_qos_depth", 5);
+        this->declare_parameter<int>("detection_qos_depth", 5);
+        this->declare_parameter<int>("marker_qos_depth", 5);
+        this->declare_parameter<double>("ground_segmentation_distance_threshold_m", 0.33);
+        this->declare_parameter<int>("ground_segmentation_max_iterations", 1000);
+        this->declare_parameter<std::vector<double>>("ground_segmentation_axis", {0.0, 0.0, 1.0});
+        this->declare_parameter<double>("ground_segmentation_eps_angle_deg", 10.0);
+        this->declare_parameter<std::vector<double>>("clustering_voxel_leaf_size", {0.3, 0.3, 0.3});
+        this->declare_parameter<bool>("enable_range_adaptive_clustering", true);
+        this->declare_parameter<std::vector<double>>("clustering_range_breakpoints_m", {10.0, 20.0});
+        this->declare_parameter<std::vector<double>>("clustering_tolerance_by_range_m", {0.7, 1.0, 1.4});
+        this->declare_parameter<double>("marker_min_dimension_m", 0.05);
+        this->declare_parameter<std::vector<double>>("marker_color_rgba", {0.0, 1.0, 0.0, 0.25});
+        this->declare_parameter<double>("marker_lifetime_sec", 0.0);
+        this->declare_parameter<std::string>("marker_namespace", "lidar_detection_boxes");
 
         this->get_parameter("processing_rate", processing_rate_);
         this->get_parameter("crop_box_min", crop_box_min_);
@@ -126,7 +144,6 @@ public:
         this->get_parameter("voxel_leaf_size", voxel_leaf_size_);
         this->get_parameter("publish_processed_lidar_pc", publish_processed_lidar_pc_);
         this->get_parameter("enable_ground_segmentation", enable_ground_segmentation_);
-        this->get_parameter("cluster_tolerance_m", cluster_tolerance_m_);
         this->get_parameter("min_cluster_points", min_cluster_points_);
         this->get_parameter("max_cluster_points", max_cluster_points_);
         this->get_parameter("min_cluster_size", min_cluster_size_);
@@ -137,32 +154,131 @@ public:
         this->get_parameter("dataset_sequence", dataset_sequence_);
         input_queue_size_ = std::max(1, static_cast<int>(this->get_parameter("input_queue_size").as_int()));
         max_buffer_age_ms_ = std::max(0.0, this->get_parameter("max_buffer_age_ms").as_double());
+        processing_timer_fallback_period_ms_ = std::max(1, static_cast<int>(this->get_parameter("processing_timer_fallback_period_ms").as_int()));
+        lidar_input_qos_depth_ = std::max(1, static_cast<int>(this->get_parameter("lidar_input_qos_depth").as_int()));
+        processed_cloud_qos_depth_ = std::max(1, static_cast<int>(this->get_parameter("processed_cloud_qos_depth").as_int()));
+        detection_qos_depth_ = std::max(1, static_cast<int>(this->get_parameter("detection_qos_depth").as_int()));
+        marker_qos_depth_ = std::max(1, static_cast<int>(this->get_parameter("marker_qos_depth").as_int()));
+        ground_segmentation_distance_threshold_m_ = std::max(0.0, this->get_parameter("ground_segmentation_distance_threshold_m").as_double());
+        ground_segmentation_max_iterations_ = std::max(1, static_cast<int>(this->get_parameter("ground_segmentation_max_iterations").as_int()));
+        this->get_parameter("ground_segmentation_axis", ground_segmentation_axis_);
+        ground_segmentation_eps_angle_deg_ = std::max(0.0, this->get_parameter("ground_segmentation_eps_angle_deg").as_double());
+        this->get_parameter("clustering_voxel_leaf_size", clustering_voxel_leaf_size_);
+        this->get_parameter("enable_range_adaptive_clustering", enable_range_adaptive_clustering_);
+        this->get_parameter("clustering_range_breakpoints_m", clustering_range_breakpoints_m_);
+        this->get_parameter("clustering_tolerance_by_range_m", clustering_tolerance_by_range_m_);
+        marker_min_dimension_m_ = std::max(0.0, this->get_parameter("marker_min_dimension_m").as_double());
+        this->get_parameter("marker_color_rgba", marker_color_rgba_);
+        marker_lifetime_sec_ = std::max(0.0, this->get_parameter("marker_lifetime_sec").as_double());
+        this->get_parameter("marker_namespace", marker_namespace_);
+
+        if (ground_segmentation_axis_.size() != 3)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Parameter 'ground_segmentation_axis' must have 3 elements. Falling back to [0.0, 0.0, 1.0].");
+            ground_segmentation_axis_ = {0.0, 0.0, 1.0};
+        }
+
+        if (marker_color_rgba_.size() != 4)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Parameter 'marker_color_rgba' must have 4 elements. Falling back to [0.0, 1.0, 0.0, 0.25].");
+            marker_color_rgba_ = {0.0, 1.0, 0.0, 0.25};
+        }
+
+        if (clustering_voxel_leaf_size_.size() != 3 ||
+            clustering_voxel_leaf_size_[0] <= 0.0 ||
+            clustering_voxel_leaf_size_[1] <= 0.0 ||
+            clustering_voxel_leaf_size_[2] <= 0.0)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Parameter 'clustering_voxel_leaf_size' must have 3 positive elements. Falling back to [0.3, 0.3, 0.3].");
+            clustering_voxel_leaf_size_ = {0.3, 0.3, 0.3};
+        }
+
+        if (clustering_tolerance_by_range_m_.empty())
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Parameter 'clustering_tolerance_by_range_m' must not be empty. Falling back to [1.0].");
+            clustering_tolerance_by_range_m_ = {1.0};
+            clustering_range_breakpoints_m_.clear();
+            enable_range_adaptive_clustering_ = false;
+        }
+
+        const bool adaptive_tolerances_positive = std::all_of(
+            clustering_tolerance_by_range_m_.begin(),
+            clustering_tolerance_by_range_m_.end(),
+            [](double tolerance_m) { return tolerance_m > 0.0; });
+
+        const bool adaptive_band_count_valid =
+            clustering_tolerance_by_range_m_.size() == (clustering_range_breakpoints_m_.size() + 1);
+        const bool adaptive_breakpoints_sorted = std::is_sorted(
+            clustering_range_breakpoints_m_.begin(),
+            clustering_range_breakpoints_m_.end());
+
+        if (!adaptive_band_count_valid || !adaptive_breakpoints_sorted || !adaptive_tolerances_positive)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Range-adaptive clustering config is invalid. Falling back to a single clustering tolerance band.");
+            clustering_tolerance_by_range_m_ = {1.0};
+            clustering_range_breakpoints_m_.clear();
+            enable_range_adaptive_clustering_ = false;
+        }
         
         crop_box_min_vec = Eigen::Vector4f(crop_box_min_[0], crop_box_min_[1], crop_box_min_[2], 1.0);
         crop_box_max_vec = Eigen::Vector4f(crop_box_max_[0], crop_box_max_[1], crop_box_max_[2], 1.0);
         voxel_leaf_size_vec = Eigen::Vector4f(voxel_leaf_size_[0], voxel_leaf_size_[1], voxel_leaf_size_[2], 1.0);
         min_cluster_size_vec_ = Eigen::Vector3f(min_cluster_size_[0], min_cluster_size_[1], min_cluster_size_[2]);
         max_cluster_size_vec_ = Eigen::Vector3f(max_cluster_size_[0], max_cluster_size_[1], max_cluster_size_[2]);
+        clustering_voxel_leaf_size_vec_ = Eigen::Vector3f(
+            clustering_voxel_leaf_size_[0],
+            clustering_voxel_leaf_size_[1],
+            clustering_voxel_leaf_size_[2]);
+        ground_segmentation_axis_vec_ = Eigen::Vector3f(
+            ground_segmentation_axis_[0],
+            ground_segmentation_axis_[1],
+            ground_segmentation_axis_[2]);
+
+        const auto lidar_input_qos =
+            rclcpp::SensorDataQoS().keep_last(static_cast<std::size_t>(lidar_input_qos_depth_));
+        const auto processed_cloud_qos =
+            rclcpp::QoS(rclcpp::KeepLast(static_cast<std::size_t>(processed_cloud_qos_depth_)))
+                .reliable()
+                .durability_volatile();
+        const auto detection_qos =
+            rclcpp::QoS(rclcpp::KeepLast(static_cast<std::size_t>(detection_qos_depth_)))
+                .reliable()
+                .durability_volatile();
+        const auto marker_qos =
+            rclcpp::QoS(rclcpp::KeepLast(static_cast<std::size_t>(marker_qos_depth_)))
+                .reliable()
+                .durability_volatile();
 
         processing_timer_ = this->create_wall_timer(
-            processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_)) : std::chrono::milliseconds(100),
+            processing_rate_ > 0 ? std::chrono::milliseconds(static_cast<int>(1000.0 / processing_rate_))
+                                 : std::chrono::milliseconds(processing_timer_fallback_period_ms_),
             std::bind(&LidarProcessing::process_latest_point_cloud, this));
         lidar_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "lidar_in",
-            10,
+            lidar_input_qos,
             std::bind(&LidarProcessing::lidar_subscriber_callback, this, std::placeholders::_1));
         if (publish_processed_lidar_pc_)
         {
             processed_cloud_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "lidar_out",
-                10);
+                processed_cloud_qos);
         }
         object_detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection3DArray>(
             "lidar_detections",
-            10);
+            detection_qos);
         object_detection_marker_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "lidar_detection_markers",
-            10);
+            marker_qos);
 
         initialize_csv_logging();
         reset_resource_window();
@@ -252,7 +368,7 @@ public:
             std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> raw_clusters;
             {
                 ScopedTimer clustering_timer(metrics.clustering_time_ms);
-                raw_clusters = euclideanClustering(output_cloud);
+                raw_clusters = voxelBasedClustering(output_cloud);
             }
 
             std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> obstacle_clusters;
@@ -365,10 +481,10 @@ public:
         seg.setOptimizeCoefficients(true);
         seg.setModelType(pcl::SACMODEL_PLANE);
         seg.setMethodType(pcl::SAC_RANSAC);
-        seg.setDistanceThreshold(0.2); // Set the distance threshold for inliers
-        seg.setMaxIterations(100);       // Set the maximum number of iterations for RANSAC
-        seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0)); // Set the axis for ground plane segmentation
-        seg.setEpsAngle(pcl::deg2rad(10.0)); // Set the angle threshold for ground plane segmentation
+        seg.setDistanceThreshold(ground_segmentation_distance_threshold_m_);
+        seg.setMaxIterations(ground_segmentation_max_iterations_);
+        seg.setAxis(ground_segmentation_axis_vec_);
+        seg.setEpsAngle(pcl::deg2rad(ground_segmentation_eps_angle_deg_));
         pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
         pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
         seg.setInputCloud(cloud);
@@ -420,7 +536,65 @@ public:
         processed_cloud_publisher_->publish(*ros2_cloud);
     }
 
-    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> euclideanClustering(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud)
+    struct VoxelKey
+    {
+        int x{0};
+        int y{0};
+        int z{0};
+
+        bool operator==(const VoxelKey &other) const
+        {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct VoxelKeyHash
+    {
+        std::size_t operator()(const VoxelKey &key) const noexcept
+        {
+            std::size_t seed = 0;
+            seed ^= std::hash<int>{}(key.x) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            seed ^= std::hash<int>{}(key.y) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            seed ^= std::hash<int>{}(key.z) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
+        }
+    };
+
+    struct VoxelCell
+    {
+        std::vector<int> point_indices;
+        Eigen::Vector3f centroid{Eigen::Vector3f::Zero()};
+        double range_m{0.0};
+        bool visited{false};
+    };
+
+    VoxelKey computeVoxelKey(const pcl::PointXYZI &point) const
+    {
+        return VoxelKey{
+            static_cast<int>(std::floor(point.x / clustering_voxel_leaf_size_vec_.x())),
+            static_cast<int>(std::floor(point.y / clustering_voxel_leaf_size_vec_.y())),
+            static_cast<int>(std::floor(point.z / clustering_voxel_leaf_size_vec_.z()))};
+    }
+
+    double getRangeAdaptiveClusterTolerance(double range_m) const
+    {
+        if (!enable_range_adaptive_clustering_ || clustering_tolerance_by_range_m_.empty())
+        {
+            return clustering_tolerance_by_range_m_.empty() ? 1.0 : clustering_tolerance_by_range_m_.front();
+        }
+
+        for (std::size_t band_index = 0; band_index < clustering_range_breakpoints_m_.size(); ++band_index)
+        {
+            if (range_m <= clustering_range_breakpoints_m_[band_index])
+            {
+                return clustering_tolerance_by_range_m_[band_index];
+            }
+        }
+
+        return clustering_tolerance_by_range_m_.back();
+    }
+
+    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> voxelBasedClustering(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud) const
     {
         std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clusters;
 
@@ -429,27 +603,104 @@ public:
             return clusters;
         }
 
-        pcl::search::KdTree<pcl::PointXYZI>::Ptr search_tree(new pcl::search::KdTree<pcl::PointXYZI>());
-        search_tree->setInputCloud(cloud);
+        std::unordered_map<VoxelKey, VoxelCell, VoxelKeyHash> occupied_voxels;
+        occupied_voxels.reserve(cloud->points.size());
 
-        std::vector<pcl::PointIndices> cluster_indices;
-        pcl::EuclideanClusterExtraction<pcl::PointXYZI> cluster_extractor;
-        cluster_extractor.setInputCloud(cloud);
-        cluster_extractor.setSearchMethod(search_tree);
-        cluster_extractor.setClusterTolerance(cluster_tolerance_m_);
-        cluster_extractor.setMinClusterSize(1);
-        cluster_extractor.setMaxClusterSize(static_cast<int>(std::min<std::size_t>(
-            cloud->points.size(),
-            static_cast<std::size_t>(std::numeric_limits<int>::max()))));
-        cluster_extractor.extract(cluster_indices);
-
-        clusters.reserve(cluster_indices.size());
-        for (const auto &indices : cluster_indices)
+        for (std::size_t point_index = 0; point_index < cloud->points.size(); ++point_index)
         {
-            auto cluster_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
-            cluster_cloud->points.reserve(indices.indices.size());
+            const auto &point = cloud->points[point_index];
+            auto &cell = occupied_voxels[computeVoxelKey(point)];
+            cell.point_indices.push_back(static_cast<int>(point_index));
+            cell.centroid += point.getVector3fMap();
+        }
 
-            for (const int point_index : indices.indices)
+        for (auto &voxel_entry : occupied_voxels)
+        {
+            auto &cell = voxel_entry.second;
+            cell.centroid /= static_cast<float>(cell.point_indices.size());
+            cell.range_m = std::hypot(static_cast<double>(cell.centroid.x()), static_cast<double>(cell.centroid.y()));
+        }
+
+        clusters.reserve(occupied_voxels.size());
+        for (auto &seed_entry : occupied_voxels)
+        {
+            auto &seed_cell = seed_entry.second;
+            if (seed_cell.visited)
+            {
+                continue;
+            }
+
+            seed_cell.visited = true;
+            std::deque<VoxelKey> voxel_queue{seed_entry.first};
+            std::vector<int> cluster_point_indices;
+
+            while (!voxel_queue.empty())
+            {
+                const VoxelKey current_key = voxel_queue.front();
+                voxel_queue.pop_front();
+
+                auto current_it = occupied_voxels.find(current_key);
+                if (current_it == occupied_voxels.end())
+                {
+                    continue;
+                }
+
+                const auto &current_cell = current_it->second;
+                cluster_point_indices.insert(
+                    cluster_point_indices.end(),
+                    current_cell.point_indices.begin(),
+                    current_cell.point_indices.end());
+
+                const double current_tolerance = getRangeAdaptiveClusterTolerance(current_cell.range_m);
+                const int neighbor_x = std::max(
+                    1,
+                    static_cast<int>(std::ceil(current_tolerance / static_cast<double>(clustering_voxel_leaf_size_vec_.x()))));
+                const int neighbor_y = std::max(
+                    1,
+                    static_cast<int>(std::ceil(current_tolerance / static_cast<double>(clustering_voxel_leaf_size_vec_.y()))));
+                const int neighbor_z = std::max(
+                    1,
+                    static_cast<int>(std::ceil(current_tolerance / static_cast<double>(clustering_voxel_leaf_size_vec_.z()))));
+
+                for (int dx = -neighbor_x; dx <= neighbor_x; ++dx)
+                {
+                    for (int dy = -neighbor_y; dy <= neighbor_y; ++dy)
+                    {
+                        for (int dz = -neighbor_z; dz <= neighbor_z; ++dz)
+                        {
+                            if (dx == 0 && dy == 0 && dz == 0)
+                            {
+                                continue;
+                            }
+
+                            const VoxelKey neighbor_key{current_key.x + dx, current_key.y + dy, current_key.z + dz};
+                            auto neighbor_it = occupied_voxels.find(neighbor_key);
+                            if (neighbor_it == occupied_voxels.end() || neighbor_it->second.visited)
+                            {
+                                continue;
+                            }
+
+                            const auto &neighbor_cell = neighbor_it->second;
+                            const double neighbor_tolerance = getRangeAdaptiveClusterTolerance(neighbor_cell.range_m);
+                            const double pair_tolerance = std::max(current_tolerance, neighbor_tolerance);
+                            const double centroid_distance =
+                                (current_cell.centroid - neighbor_cell.centroid).norm();
+
+                            if (centroid_distance > pair_tolerance)
+                            {
+                                continue;
+                            }
+
+                            neighbor_it->second.visited = true;
+                            voxel_queue.push_back(neighbor_key);
+                        }
+                    }
+                }
+            }
+
+            auto cluster_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+            cluster_cloud->points.reserve(cluster_point_indices.size());
+            for (const int point_index : cluster_point_indices)
             {
                 cluster_cloud->points.push_back(cloud->points[point_index]);
             }
@@ -463,29 +714,6 @@ public:
         return clusters;
     }
 
-    struct AxisAlignedClusterBounds
-    {
-        Eigen::Vector4f min_point{Eigen::Vector4f::Zero()};
-        Eigen::Vector4f max_point{Eigen::Vector4f::Zero()};
-
-        Eigen::Vector3f dimensions() const
-        {
-            return (max_point - min_point).head<3>();
-        }
-    };
-
-    AxisAlignedClusterBounds computeAxisAlignedClusterBounds(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cluster) const
-    {
-        AxisAlignedClusterBounds bounds;
-        if (!cluster || cluster->empty())
-        {
-            return bounds;
-        }
-
-        pcl::getMinMax3D(*cluster, bounds.min_point, bounds.max_point);
-        return bounds;
-    }
-
     bool clusterPassesPointCountFilter(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cluster) const
     {
         if (!cluster)
@@ -497,9 +725,8 @@ public:
         return point_count >= min_cluster_points_ && point_count <= max_cluster_points_;
     }
 
-    bool clusterPassesSizeFilter(const AxisAlignedClusterBounds &bounds) const
+    bool clusterPassesSizeFilter(const Eigen::Vector3f &cluster_dimensions) const
     {
-        const Eigen::Vector3f cluster_dimensions = bounds.dimensions();
         return (cluster_dimensions.array() >= min_cluster_size_vec_.array()).all() &&
                (cluster_dimensions.array() <= max_cluster_size_vec_.array()).all();
     }
@@ -517,8 +744,8 @@ public:
                 continue;
             }
 
-            const auto cluster_bounds = computeAxisAlignedClusterBounds(cluster);
-            if (!clusterPassesSizeFilter(cluster_bounds))
+            const auto cluster_box = computeOrientedClusterBox(cluster);
+            if (!clusterPassesSizeFilter(cluster_box.size))
             {
                 continue;
             }
@@ -533,7 +760,71 @@ public:
     {
         Eigen::Vector3f center{Eigen::Vector3f::Zero()};
         Eigen::Vector3f size{Eigen::Vector3f::Zero()};
+        Eigen::Quaternionf orientation{Eigen::Quaternionf::Identity()};
     };
+
+    ClusterBox computeOrientedClusterBox(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cluster) const
+    {
+        ClusterBox box;
+        if (!cluster || cluster->empty())
+        {
+            return box;
+        }
+
+        Eigen::Vector4f centroid_4f = Eigen::Vector4f::Zero();
+        pcl::compute3DCentroid(*cluster, centroid_4f);
+        const Eigen::Vector2f centroid_xy = centroid_4f.head<2>();
+
+        Eigen::Matrix2f covariance = Eigen::Matrix2f::Zero();
+        for (const auto &point : cluster->points)
+        {
+            const Eigen::Vector2f delta(point.x - centroid_xy.x(), point.y - centroid_xy.y());
+            covariance += delta * delta.transpose();
+        }
+        covariance /= static_cast<float>(cluster->points.size());
+
+        Eigen::Vector2f principal_axis = Eigen::Vector2f::UnitX();
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eigen_solver(covariance);
+        if (eigen_solver.info() == Eigen::Success)
+        {
+            principal_axis = eigen_solver.eigenvectors().col(1);
+            if (principal_axis.x() < 0.0f ||
+                (std::abs(principal_axis.x()) < 1e-5f && principal_axis.y() < 0.0f))
+            {
+                principal_axis = -principal_axis;
+            }
+        }
+
+        const float yaw = std::atan2(principal_axis.y(), principal_axis.x());
+        const Eigen::Matrix2f rotation =
+            Eigen::Rotation2Df(yaw).toRotationMatrix();
+
+        Eigen::Vector2f min_local = Eigen::Vector2f::Constant(std::numeric_limits<float>::max());
+        Eigen::Vector2f max_local = Eigen::Vector2f::Constant(std::numeric_limits<float>::lowest());
+        float min_z = std::numeric_limits<float>::max();
+        float max_z = std::numeric_limits<float>::lowest();
+
+        for (const auto &point : cluster->points)
+        {
+            const Eigen::Vector2f point_xy(point.x, point.y);
+            const Eigen::Vector2f local_xy = rotation.transpose() * (point_xy - centroid_xy);
+            min_local = min_local.cwiseMin(local_xy);
+            max_local = max_local.cwiseMax(local_xy);
+            min_z = std::min(min_z, point.z);
+            max_z = std::max(max_z, point.z);
+        }
+
+        const Eigen::Vector2f local_center = 0.5f * (min_local + max_local);
+        const Eigen::Vector2f world_center_xy = centroid_xy + (rotation * local_center);
+
+        box.center = Eigen::Vector3f(world_center_xy.x(), world_center_xy.y(), 0.5f * (min_z + max_z));
+        box.size = Eigen::Vector3f(
+            std::max(0.0f, max_local.x() - min_local.x()),
+            std::max(0.0f, max_local.y() - min_local.y()),
+            std::max(0.0f, max_z - min_z));
+        box.orientation = Eigen::Quaternionf(Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ()));
+        return box;
+    }
 
     std::vector<ClusterBox> compute3dBoundingBoxes(
         const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> &clusters) const
@@ -543,11 +834,7 @@ public:
 
         for (const auto &cluster : clusters)
         {
-            const auto cluster_bounds = computeAxisAlignedClusterBounds(cluster);
-            ClusterBox box;
-            box.center = ((cluster_bounds.min_point + cluster_bounds.max_point) * 0.5f).head<3>();
-            box.size = cluster_bounds.dimensions();
-            cluster_boxes.push_back(box);
+            cluster_boxes.push_back(computeOrientedClusterBox(cluster));
         }
 
         return cluster_boxes;
@@ -571,10 +858,10 @@ public:
             detection_msg.bbox.center.position.x = cluster_box.center.x();
             detection_msg.bbox.center.position.y = cluster_box.center.y();
             detection_msg.bbox.center.position.z = cluster_box.center.z();
-            detection_msg.bbox.center.orientation.x = 0.0;
-            detection_msg.bbox.center.orientation.y = 0.0;
-            detection_msg.bbox.center.orientation.z = 0.0;
-            detection_msg.bbox.center.orientation.w = 1.0;
+            detection_msg.bbox.center.orientation.x = cluster_box.orientation.x();
+            detection_msg.bbox.center.orientation.y = cluster_box.orientation.y();
+            detection_msg.bbox.center.orientation.z = cluster_box.orientation.z();
+            detection_msg.bbox.center.orientation.w = cluster_box.orientation.w();
             detection_msg.bbox.size.x = cluster_box.size.x();
             detection_msg.bbox.size.y = cluster_box.size.y();
             detection_msg.bbox.size.z = cluster_box.size.z();
@@ -598,25 +885,25 @@ public:
             visualization_msgs::msg::Marker marker;
             marker.header = header;
             marker.header.stamp = rclcpp::Time(0);
-            marker.ns = "lidar_detection_boxes";
+            marker.ns = marker_namespace_;
             marker.id = static_cast<int>(cluster_index);
             marker.type = visualization_msgs::msg::Marker::CUBE;
             marker.action = visualization_msgs::msg::Marker::ADD;
             marker.pose.position.x = cluster_box.center.x();
             marker.pose.position.y = cluster_box.center.y();
             marker.pose.position.z = cluster_box.center.z();
-            marker.pose.orientation.x = 0.0;
-            marker.pose.orientation.y = 0.0;
-            marker.pose.orientation.z = 0.0;
-            marker.pose.orientation.w = 1.0;
-            marker.scale.x = std::max(static_cast<double>(cluster_box.size.x()), 0.05);
-            marker.scale.y = std::max(static_cast<double>(cluster_box.size.y()), 0.05);
-            marker.scale.z = std::max(static_cast<double>(cluster_box.size.z()), 0.05);
-            marker.color.r = 0.0f;
-            marker.color.g = 1.0f;
-            marker.color.b = 0.0f;
-            marker.color.a = 0.25f;
-            marker.lifetime = rclcpp::Duration::from_seconds(0.0);
+            marker.pose.orientation.x = cluster_box.orientation.x();
+            marker.pose.orientation.y = cluster_box.orientation.y();
+            marker.pose.orientation.z = cluster_box.orientation.z();
+            marker.pose.orientation.w = cluster_box.orientation.w();
+            marker.scale.x = std::max(static_cast<double>(cluster_box.size.x()), marker_min_dimension_m_);
+            marker.scale.y = std::max(static_cast<double>(cluster_box.size.y()), marker_min_dimension_m_);
+            marker.scale.z = std::max(static_cast<double>(cluster_box.size.z()), marker_min_dimension_m_);
+            marker.color.r = static_cast<float>(marker_color_rgba_[0]);
+            marker.color.g = static_cast<float>(marker_color_rgba_[1]);
+            marker.color.b = static_cast<float>(marker_color_rgba_[2]);
+            marker.color.a = static_cast<float>(marker_color_rgba_[3]);
+            marker.lifetime = rclcpp::Duration::from_seconds(marker_lifetime_sec_);
             marker.frame_locked = false;
             marker_array.markers.push_back(marker);
         }
@@ -959,18 +1246,36 @@ private:
     std::vector<double> voxel_leaf_size_;
     bool publish_processed_lidar_pc_;
     bool enable_ground_segmentation_;
-    double cluster_tolerance_m_;
     int min_cluster_points_;
     int max_cluster_points_;
     std::vector<double> min_cluster_size_;
     std::vector<double> max_cluster_size_;
     int input_queue_size_{3};
     double max_buffer_age_ms_{300.0};
+    int processing_timer_fallback_period_ms_{100};
+    int lidar_input_qos_depth_{10};
+    int processed_cloud_qos_depth_{10};
+    int detection_qos_depth_{10};
+    int marker_qos_depth_{10};
+    double ground_segmentation_distance_threshold_m_{0.33};
+    int ground_segmentation_max_iterations_{1000};
+    std::vector<double> ground_segmentation_axis_{0.0, 0.0, 1.0};
+    double ground_segmentation_eps_angle_deg_{10.0};
+    std::vector<double> clustering_voxel_leaf_size_{0.3, 0.3, 0.3};
+    bool enable_range_adaptive_clustering_{true};
+    std::vector<double> clustering_range_breakpoints_m_{10.0, 20.0};
+    std::vector<double> clustering_tolerance_by_range_m_{0.7, 1.0, 1.4};
+    double marker_min_dimension_m_{0.05};
+    std::vector<double> marker_color_rgba_{0.0, 1.0, 0.0, 0.25};
+    double marker_lifetime_sec_{0.0};
+    std::string marker_namespace_{"lidar_detection_boxes"};
     Eigen::Vector4f crop_box_min_vec;
     Eigen::Vector4f crop_box_max_vec;
     Eigen::Vector4f voxel_leaf_size_vec;
     Eigen::Vector3f min_cluster_size_vec_;
     Eigen::Vector3f max_cluster_size_vec_;
+    Eigen::Vector3f clustering_voxel_leaf_size_vec_{0.3f, 0.3f, 0.3f};
+    Eigen::Vector3f ground_segmentation_axis_vec_{0.0f, 0.0f, 1.0f};
     int interval_frame_count_{0};
     double interval_sum_buffer_age_ms_{0.0};
     double interval_sum_conversion_ms_{0.0};

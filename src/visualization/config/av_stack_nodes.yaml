@@ -14,10 +14,10 @@ lidar_processing:
     min_cluster_size: [0.4, 0.4, 0.4]  # Minimum oriented box size [length, width, height] in meters for valid clusters.
     max_cluster_size: [10.0, 8.0, 3.0]  # Maximum oriented box size [length, width, height] in meters for valid clusters.
     processing_timer_fallback_period_ms: 100  # Fallback timer period used when processing_rate is invalid or non-positive.
-    lidar_input_qos_depth: 10  # ROS subscription queue depth for the input LiDAR topic.
-    processed_cloud_qos_depth: 10  # ROS publisher queue depth for the processed point cloud topic.
-    detection_qos_depth: 10  # ROS publisher queue depth for the 3D detections topic.
-    marker_qos_depth: 10  # ROS publisher queue depth for the marker topic.
+    lidar_input_qos_depth: 5  # Sensor-data QoS history depth for the input LiDAR topic.
+    processed_cloud_qos_depth: 5  # Reliable keep-last history depth for the processed point cloud topic.
+    detection_qos_depth: 5  # Reliable keep-last history depth for the 3D detections topic.
+    marker_qos_depth: 5  # Reliable keep-last history depth for the marker topic.
     ground_segmentation_distance_threshold_m: 0.33  # Maximum point-to-plane distance for RANSAC ground inliers, in meters.
     ground_segmentation_max_iterations: 100  # Maximum number of RANSAC iterations used for ground segmentation.
     ground_segmentation_axis: [0.0, 0.0, 1.0]  # Preferred ground normal axis used by the RANSAC plane fitter.

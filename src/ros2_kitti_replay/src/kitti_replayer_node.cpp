@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <image_transport/image_transport.hpp>
+#include <rmw/qos_profiles.h>
 #include <ros2_kitti_core/clock_data_loader.hpp>
 #include <ros2_kitti_core/image_data_loader.hpp>
 #include <ros2_kitti_core/point_cloud_data_loader.hpp>
@@ -15,6 +16,23 @@
 
 namespace r2k_replay
 {
+namespace
+{
+constexpr std::size_t kSensorDataHistoryDepth{5};
+
+rclcpp::QoS make_sensor_data_qos(const std::size_t depth)
+{
+  return rclcpp::SensorDataQoS().keep_last(depth);
+}
+
+rmw_qos_profile_t make_sensor_data_rmw_qos(const std::size_t depth)
+{
+  auto qos_profile = rmw_qos_profile_sensor_data;
+  qos_profile.depth = depth;
+  return qos_profile;
+}
+}  // namespace
+
 const rclcpp::QoS KITTIReplayerNode::kLatchingQoS{
   rclcpp::QoSInitialization{RMW_QOS_POLICY_HISTORY_SYSTEM_DEFAULT, 1},
   rmw_qos_profile_t{
@@ -142,7 +160,7 @@ KITTIReplayerNode::KITTIReplayerNode(const rclcpp::NodeOptions & options)
     auto pc_interface_ptr = make_shared_interface(
       "pc_interface",
       [pub_ptr = create_publisher<PointCloudDataLoader::DataType>(
-         "lidar_pc", kPublisherHistoryDepth)](const auto & msg) {
+         "lidar_pc", make_sensor_data_qos(kSensorDataHistoryDepth))](const auto & msg) {
         pub_ptr->publish(msg);
         return true;
       },
@@ -379,7 +397,8 @@ KITTIReplayerNode::create_image_play_data_interface(
   img_loader_ptr->setup(timestamps, folder_path);
   auto interface_ptr = make_shared_interface(
     topic_name + "_interface",
-    [pub = image_transport::create_publisher(this, topic_name)](const auto & msg) {
+    [pub = image_transport::create_publisher(
+       this, topic_name, make_sensor_data_rmw_qos(kSensorDataHistoryDepth))](const auto & msg) {
       pub.publish(msg);
       return true;
     },
