@@ -16,6 +16,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(vision_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(auto_stack_msgs REQUIRED)
 # find_package(onnxruntime REQUIRED)
@@ -26,7 +27,7 @@ find_package(auto_stack_msgs REQUIRED)
 set(ONNXRUNTIME_ROOT "/usr/local/onnxruntime")
 
 add_executable(camera_processing src/camera_processing.cpp src/yolo_detector.cpp)
-ament_target_dependencies(camera_processing rclcpp sensor_msgs cv_bridge vision_msgs auto_stack_msgs OpenCV)
+ament_target_dependencies(camera_processing rclcpp sensor_msgs cv_bridge vision_msgs visualization_msgs auto_stack_msgs OpenCV)
 
 target_include_directories(camera_processing PUBLIC include ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_ROOT}/include)
 
@@ -37,8 +38,21 @@ target_link_libraries(camera_processing
   ${OpenCV_LIBS}
   onnxruntime)
 
+add_executable(stereo_camera_processing src/stereo_camera_processing.cpp src/yolo_detector.cpp)
+ament_target_dependencies(stereo_camera_processing rclcpp sensor_msgs cv_bridge vision_msgs visualization_msgs auto_stack_msgs OpenCV)
+
+target_include_directories(stereo_camera_processing PUBLIC include ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_ROOT}/include)
+
+target_link_directories(stereo_camera_processing
+  PUBLIC ${OpenCV_LIBRARY_DIRS} ${ONNXRUNTIME_ROOT}/lib)
+
+target_link_libraries(stereo_camera_processing
+  ${OpenCV_LIBS}
+  onnxruntime)
+
 install(TARGETS
   camera_processing
+  stereo_camera_processing
   DESTINATION lib/${PROJECT_NAME})
 
 

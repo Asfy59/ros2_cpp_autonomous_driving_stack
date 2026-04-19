@@ -174,11 +174,14 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package='camera_processing',
                 name="camera_processing",
-                executable='camera_processing',
+                executable='stereo_camera_processing',
                 remappings=[
-                    ("camera_in", "/p2_img"),
+                    ("left_camera_in", "/p2_img"),
+                    ("right_camera_in", "/p3_img"),
                     ("object_detections", "object_detections"),
                     ("camera_info", "p2_camera_info"),
+                    ("right_camera_info", "p3_camera_info"),
+                    ("camera_stereo_detections", "camera_stereo_detections"),
                 ],
                 parameters=[
                     stack_parameters,

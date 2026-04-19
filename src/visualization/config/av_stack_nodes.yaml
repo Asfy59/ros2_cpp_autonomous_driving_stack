@@ -39,13 +39,26 @@ camera_processing:
     processing_rate: 10.0  # Processing loop frequency in Hz.
     input_queue_size: 4  # Number of incoming camera frames buffered before older frames are dropped.
     max_buffer_age_ms: 300.0  # Maximum age of a buffered frame before it is discarded.
-    model_path: "models/yolo/yolov8n.onnx"  # Path to the ONNX object detection model.
+    stereo_sync_tolerance_ms: 50.0  # Maximum timestamp mismatch allowed between left and right camera frames.
+    model_path: "models/yolo/yolo8n.onnx"  # Path to the ONNX object detection model.
     publish_overlay_image: true  # Whether to publish the camera overlay image with detections.
     publish_camera_info: true  # Whether to publish the camera_info topic from this node.
+    publish_detection_markers: true  # Whether to publish RViz MarkerArray output for stereo camera detections.
+    detection_markers_topic: "camera_stereo_detection_markers"  # MarkerArray topic used to visualize stereo camera detections in RViz.
     profiling_interval_frames: 60  # Number of processed frames per profiling/logging interval.
     enable_csv_logging: true  # Whether to write interval performance metrics to CSV.
     csv_log_dir: "csv_logs/camera_processing"  # Directory where camera profiling CSV logs are written.
-    camera_name: "p2"  # Camera name used for topic naming and calibration lookup.
+    left_camera_name: "p2"  # Left color camera name used for stereo calibration lookup.
+    right_camera_name: "p3"  # Right color camera name used for stereo calibration lookup.
+    stereo_num_disparities: 128  # Horizontal disparity search range in pixels; must remain divisible by 16.
+    stereo_block_size: 5  # StereoSGBM matching block size in pixels; must remain odd.
+    stereo_uniqueness_ratio: 10  # StereoSGBM uniqueness ratio used to reject ambiguous matches.
+    stereo_speckle_window_size: 100  # StereoSGBM speckle filter window size.
+    stereo_speckle_range: 2  # StereoSGBM speckle disparity variation threshold.
+    min_valid_disparity_px: 1.0  # Minimum disparity accepted when converting detections into metric depth.
+    stereo_min_depth_m: 1.0  # Minimum stereo-derived detection depth in meters.
+    stereo_max_depth_m: 80.0  # Maximum stereo-derived detection depth in meters.
+    roi_sampling_border_px: 6  # Border excluded from disparity sampling inside each detection ROI.
 
 fusion_core:
   ros__parameters:
