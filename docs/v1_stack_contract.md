@@ -1,28 +1,38 @@
 # V1 Stack Contract
 
-## Public v1 outputs
+This document records the current interface for the active tracker stack.
 
-- `/tracked_objects` (`ros2_kitti_msgs/msg/TrackedObjectArray`)
-- `/decision_state` (`ros2_kitti_msgs/msg/DecisionState`)
+## Active Public Topics
 
-These are the two public outputs that define "working v1" for the mini-stack.
+- `/tracked_objects`
+- `/tracked_markers`
 
-## Input source
+## Supporting Detection Topics
 
-- Replay source: `ros2_kitti_replay`
-- Canonical replay topics:
-  - `/lidar_pc`
-  - `/p0_img`
-  - `/p1_img`
-  - `/p2_img`
-  - `/p3_img`
-  - `/clock`
+- `/lidar_detections`
+- `/lidar_detection_markers`
+- `/camera_stereo_detections`
+- `/camera_stereo_detection_markers`
 
-## Package ownership
+## Frame Convention
 
-- `ros2_kitti_msgs`: shared interfaces only
-- `replay_adapter`: optional normalization layer for topics, frames, and QoS
-- `lidar_processing`: LiDAR-side object proposal extraction
-- `camera_processing`: camera-side detections or enrichment
-- `fusion_core`: tracking, fusion, and behavior decision logic
-- `visualization`: top-level bringup and RViz entrypoints
+- Tracker state is maintained in `map`
+- Sensor detections are transformed into `map` before association and update
+
+## Ownership
+
+- `lidar_processing`
+  LiDAR detections only
+- `camera_processing`
+  Stereo detections only
+- `fusion_core`
+  Persistent tracking and fused tracked-object output
+- `visualization`
+  Bringup and parameterization
+
+## Current Status
+
+The active tracker implementation is
+[ekf_multi_object_tracker.cpp](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/fusion_core/src/ekf_multi_object_tracker.cpp).
+
+`decision_state` is not part of the active EKF tracker bringup.

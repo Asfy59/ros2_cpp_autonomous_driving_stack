@@ -7,8 +7,10 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(eigen3_cmake_module REQUIRED)
 find_package(auto_stack_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -24,6 +26,7 @@ find_package(vision_msgs REQUIRED)
 # find_package(<dependency> REQUIRED)
 add_executable(fusion_core src/fusion_core.cpp)
 add_executable(tracking_based_fusion src/tracking_based_fusion.cpp)
+add_executable(ekf_multi_object_tracker src/ekf_multi_object_tracker.cpp)
 ament_target_dependencies(
   fusion_core
   auto_stack_msgs
@@ -48,6 +51,18 @@ ament_target_dependencies(
   rclcpp
   sensor_msgs
   std_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+  visualization_msgs
+  vision_msgs)
+
+ament_target_dependencies(
+  ekf_multi_object_tracker
+  Eigen3
+  auto_stack_msgs
+  geometry_msgs
+  rclcpp
   tf2
   tf2_geometry_msgs
   tf2_ros
@@ -63,6 +78,7 @@ target_link_libraries(tracking_based_fusion ${OpenCV_LIBS})
 install(TARGETS
   fusion_core
   tracking_based_fusion
+  ekf_multi_object_tracker
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)

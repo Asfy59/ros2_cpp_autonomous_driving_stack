@@ -1,0 +1,110 @@
+lidar_processing:
+  ros__parameters:
+    processing_rate: 10.0
+    input_queue_size: 3
+    max_buffer_age_ms: 300.0
+    crop_box_min: [0.0, -7.0, -2.0]
+    crop_box_max: [25.0, 7.0, 2.0]
+    voxel_leaf_size: [0.15, 0.15, 0.15]
+    publish_processed_lidar_pc: true
+    enable_ground_segmentation: true
+    min_cluster_points: 10
+    max_cluster_points: 3000
+    min_cluster_size: [0.4, 0.4, 0.4]
+    max_cluster_size: [5.0, 5.0, 2.5]
+    processing_timer_fallback_period_ms: 100
+    lidar_input_qos_depth: 5
+    processed_cloud_qos_depth: 5
+    detection_qos_depth: 5
+    marker_qos_depth: 5
+    ground_segmentation_distance_threshold_m: 0.33
+    ground_segmentation_max_iterations: 100
+    ground_segmentation_axis: [0.0, 0.0, 1.0]
+    ground_segmentation_eps_angle_deg: 10.0
+    clustering_voxel_leaf_size: [0.3, 0.3, 0.3]
+    enable_range_adaptive_clustering: true
+    clustering_range_breakpoints_m: [10.0, 20.0]
+    clustering_tolerance_by_range_m: [0.6, 0.8, 1.0]
+    marker_min_dimension_m: 0.05
+    marker_color_rgba: [0.0, 1.0, 0.0, 0.25]
+    marker_lifetime_sec: 0.0
+    marker_namespace: "lidar_detection_boxes"
+    profiling_interval_frames: 60
+    enable_csv_logging: true
+    csv_log_dir: "csv_logs/lidar_processing"
+
+camera_processing:
+  ros__parameters:
+    processing_rate: 10.0
+    input_queue_size: 4
+    max_buffer_age_ms: 300.0
+    stereo_sync_tolerance_ms: 50.0
+    model_path: "models/yolo/yolo8n.onnx"
+    publish_overlay_image: true
+    publish_camera_info: true
+    publish_detection_markers: true
+    detection_markers_topic: "camera_stereo_detection_markers"
+    detection_marker_lifetime_sec: 0.0
+    profiling_interval_frames: 60
+    enable_csv_logging: true
+    csv_log_dir: "csv_logs/camera_processing"
+    left_camera_name: "p2"
+    right_camera_name: "p3"
+    stereo_num_disparities: 128
+    stereo_block_size: 5
+    stereo_uniqueness_ratio: 10
+    stereo_speckle_window_size: 100
+    stereo_speckle_range: 2
+    min_valid_disparity_px: 1.0
+    stereo_min_depth_m: 1.0
+    stereo_max_depth_m: 30.0
+    roi_sampling_border_px: 6
+
+ekf_multi_object_tracker:
+  ros__parameters:
+    tracking_frame: "map"
+    lidar_detections_topic: "lidar_detections"
+    stereo_detections_topic: "camera_stereo_detections"
+    tracked_objects_topic: "tracked_objects"
+    tracked_markers_topic: "tracked_markers"
+    tracker_rate_hz: 10.0
+    lidar_buffer_size: 10
+    stereo_buffer_size: 10
+    max_measurement_age_ms: 200.0
+    tf_lookup_timeout_ms: 50.0
+    publish_debug_markers: true
+    marker_lifetime_sec: 0.0
+    yaw_update_alpha: 0.25
+    stereo_birth_default_length_m: 1.0
+    stereo_birth_default_width_m: 1.0
+    sigma_a_x: 0.3
+    sigma_a_y: 0.3
+    sigma_length: 0.3
+    sigma_width: 0.3
+    sigma_lidar_px: 0.3
+    sigma_lidar_py: 0.3
+    sigma_lidar_length: 0.5
+    sigma_lidar_width: 0.5
+    sigma_stereo_px: 0.7
+    sigma_stereo_py: 0.7
+    sigma_birth_lidar_px: 0.3
+    sigma_birth_lidar_py: 0.3
+    sigma_birth_lidar_vx: 2.0
+    sigma_birth_lidar_vy: 2.0
+    sigma_birth_lidar_length: 0.6
+    sigma_birth_lidar_width: 0.6
+    sigma_birth_stereo_px: 0.8
+    sigma_birth_stereo_py: 0.8
+    sigma_birth_stereo_vx: 3.0
+    sigma_birth_stereo_vy: 3.0
+    sigma_birth_stereo_length: 1.5
+    sigma_birth_stereo_width: 1.5
+    lidar_gate_mahalanobis_sq: 9.0
+    stereo_gate_mahalanobis_sq: 9.0
+    p_init_lidar: 0.35
+    p_init_stereo: 0.20
+    lidar_hit_gain: 0.10
+    stereo_hit_gain: 0.05
+    miss_decay: 0.10
+    confirmation_threshold: 0.75
+    deletion_threshold: 0.20

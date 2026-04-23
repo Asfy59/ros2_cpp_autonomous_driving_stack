@@ -1,12 +1,9 @@
-from pathlib import Path
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
-from launch_ros.actions import ComposableNodeContainer, Node
-from launch_ros.descriptions import ComposableNode
+from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
 def generate_launch_description() -> LaunchDescription:
@@ -17,7 +14,6 @@ def generate_launch_description() -> LaunchDescription:
     end_time = LaunchConfiguration("end_time")
     enable_camera_csv_logging = LaunchConfiguration("enable_camera_csv_logging")
     enable_lidar_csv_logging = LaunchConfiguration("enable_lidar_csv_logging")
-    enable_fusion_csv_logging = LaunchConfiguration("enable_fusion_csv_logging")
     launch_rviz = LaunchConfiguration("launch_rviz")
     enable_point_cloud = LaunchConfiguration("enable_point_cloud")
     enable_gray_images = LaunchConfiguration("enable_gray_images")
@@ -50,9 +46,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "stack_config_path",
                 default_value=PathJoinSubstitution(
-                    [FindPackageShare("visualization"), "config", "av_stack_nodes.yaml"]
+                    [FindPackageShare("visualization"), "config", "ekf_tracker_stack.yaml"]
                 ),
-                description="YAML file with the node parameter set for the current stack run",
+                description="YAML file with the node parameter set for the active EKF tracker stack",
             ),
             DeclareLaunchArgument(
                 "start_time",
@@ -73,11 +69,6 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_lidar_csv_logging",
                 default_value="false",
                 description="Enable interval CSV logging for the lidar processing node",
-            ),
-            DeclareLaunchArgument(
-                "enable_fusion_csv_logging",
-                default_value="false",
-                description="Enable interval CSV logging for the fusion core node",
             ),
             DeclareLaunchArgument(
                 "launch_rviz",
@@ -148,13 +139,6 @@ def generate_launch_description() -> LaunchDescription:
                     "vehicle_sensor_link": vehicle_sensor_link,
                 }.items(),
             ),
-            # Node(
-            # package='fusion_core',
-            # name="fusion",
-            # executable='fusion_core',
-            # remappings={
-            #         ("camera_topic", "p2_img"),
-            # }
             Node(
                 package='lidar_processing',
                 name="lidar_processing",
@@ -192,15 +176,11 @@ def generate_launch_description() -> LaunchDescription:
             ),
             Node(
                 package='fusion_core',
-                name="fusion_core",
-                executable='tracking_based_fusion',
+                name="ekf_multi_object_tracker",
+                executable='ekf_multi_object_tracker',
                 parameters=[
                     stack_parameters,
-                    {"enable_csv_logging": enable_fusion_csv_logging},
-                    {"dataset_sequence": ParameterValue(dataset_number, value_type=str)},
                 ],
             ),
-
-            
         ]
     )
