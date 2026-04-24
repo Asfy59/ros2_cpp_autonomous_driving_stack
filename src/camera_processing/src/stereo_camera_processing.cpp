@@ -183,6 +183,35 @@ std::string class_id_to_label(const int class_id)
     }
 }
 
+std::string class_id_string_to_label(const std::string &class_id)
+{
+    if (class_id == "0")
+    {
+        return "person";
+    }
+    if (class_id == "1")
+    {
+        return "bicycle";
+    }
+    if (class_id == "2")
+    {
+        return "car";
+    }
+    if (class_id == "3")
+    {
+        return "motorcycle";
+    }
+    if (class_id == "5")
+    {
+        return "bus";
+    }
+    if (class_id == "7")
+    {
+        return "truck";
+    }
+    return class_id.empty() ? "stereo" : ("class_" + class_id);
+}
+
 struct ObjectDimensions
 {
     double length_m{1.0};
@@ -232,6 +261,7 @@ public:
         declare_parameter<bool>("publish_camera_info", false);
         declare_parameter<bool>("publish_detection_markers", false);
         declare_parameter<std::string>("detection_markers_topic", "camera_stereo_detection_markers");
+        declare_parameter<double>("detection_marker_lifetime_sec", 0.0);
         declare_parameter<int>("profiling_interval_frames", 60);
         declare_parameter<bool>("enable_csv_logging", false);
         declare_parameter<std::string>("csv_log_dir", "csv_logs/camera_processing");
@@ -258,6 +288,8 @@ public:
         publish_camera_info_ = get_parameter("publish_camera_info").as_bool();
         publish_detection_markers_ = get_parameter("publish_detection_markers").as_bool();
         detection_markers_topic_ = get_parameter("detection_markers_topic").as_string();
+        detection_marker_lifetime_sec_ =
+            std::max(0.0, get_parameter("detection_marker_lifetime_sec").as_double());
         profiling_interval_frames_ =
             static_cast<int>(get_parameter("profiling_interval_frames").as_int());
         csv_logging_ = get_parameter("enable_csv_logging").as_bool();
@@ -435,6 +467,7 @@ private:
     bool publish_overlay_image_{false};
     bool publish_camera_info_{false};
     bool publish_detection_markers_{false};
+    double detection_marker_lifetime_sec_{0.0};
     std::string dataset_path_;
     std::string dataset_sequence_{"unknown"};
     std::string detection_markers_topic_{"camera_stereo_detection_markers"};
@@ -593,9 +626,20 @@ private:
             }
 
             std::vector<YoloDetectionResult> detections;
+            try
             {
                 ScopedTimer inference_timer(metrics.inference_time_ms);
                 detections = yolo_detector_->infer(left_image);
+            }
+            catch (const std::exception &exception)
+            {
+                RCLCPP_ERROR_THROTTLE(
+                    get_logger(),
+                    *get_clock(),
+                    2000,
+                    "Stereo detector inference failed: %s",
+                    exception.what());
+                return;
             }
             metrics.num_2d_detections = detections.size();
 
@@ -864,7 +908,7 @@ private:
             box_marker.color.g = 0.85F;
             box_marker.color.b = 1.0F;
             box_marker.color.a = 0.35F;
-            box_marker.lifetime = rclcpp::Duration::from_seconds(0.25);
+            box_marker.lifetime = rclcpp::Duration::from_seconds(detection_marker_lifetime_sec_);
             marker_array.markers.push_back(box_marker);
 
             visualization_msgs::msg::Marker text_marker;
@@ -884,10 +928,10 @@ private:
             const std::string label =
                 detection.results.empty()
                     ? "stereo"
-                    : class_id_to_label(std::stoi(detection.results.front().hypothesis.class_id));
+                    : class_id_string_to_label(detection.results.front().hypothesis.class_id);
             text_marker.text =
                 label + " " + cv::format("%.1fm", detection.bbox.center.position.z);
-            text_marker.lifetime = rclcpp::Duration::from_seconds(0.25);
+            text_marker.lifetime = rclcpp::Duration::from_seconds(detection_marker_lifetime_sec_);
             marker_array.markers.push_back(text_marker);
         }
 
