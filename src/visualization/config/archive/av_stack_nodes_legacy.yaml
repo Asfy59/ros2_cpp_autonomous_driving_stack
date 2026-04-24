@@ -1,4 +1,3 @@
-
 lidar_processing:
   ros__parameters:
     processing_rate: 10.0  # Processing loop frequency in Hz.
@@ -45,6 +44,7 @@ camera_processing:
     publish_camera_info: true  # Whether to publish the camera_info topic from this node.
     publish_detection_markers: true  # Whether to publish RViz MarkerArray output for stereo camera detections.
     detection_markers_topic: "camera_stereo_detection_markers"  # MarkerArray topic used to visualize stereo camera detections in RViz.
+    detection_marker_lifetime_sec: 0.0  # Marker lifetime in seconds; 0.0 means markers persist until the next MarkerArray update clears or replaces them.
     profiling_interval_frames: 60  # Number of processed frames per profiling/logging interval.
     enable_csv_logging: true  # Whether to write interval performance metrics to CSV.
     csv_log_dir: "csv_logs/camera_processing"  # Directory where camera profiling CSV logs are written.
@@ -57,18 +57,20 @@ camera_processing:
     stereo_speckle_range: 2  # StereoSGBM speckle disparity variation threshold.
     min_valid_disparity_px: 1.0  # Minimum disparity accepted when converting detections into metric depth.
     stereo_min_depth_m: 1.0  # Minimum stereo-derived detection depth in meters.
-    stereo_max_depth_m: 80.0  # Maximum stereo-derived detection depth in meters.
+    stereo_max_depth_m: 30.0  # Maximum stereo-derived detection depth in meters.
     roi_sampling_border_px: 6  # Border excluded from disparity sampling inside each detection ROI.
 
 fusion_core:
   ros__parameters:
     lidar_detections_topic: "lidar_detections"  # Input topic carrying LiDAR 3D detections.
     camera_detections_topic: "object_detections"  # Input topic carrying camera 2D detections.
+    camera_stereo_detections_topic: "camera_stereo_detections"  # Input topic carrying stereo-derived camera 3D detections.
     camera_image_topic: "/p2_img"  # Input topic carrying the camera image used for projection and overlay.
     camera_info_topic: "p2_camera_info"  # Input topic carrying the camera calibration data.
     tracking_frame: "map"  # Stable world frame used internally by the tracker for prediction and association.
     tracked_objects_topic: "tracked_objects"  # Output topic carrying fused or tracked objects.
     tracked_object_markers_topic: "tracked_object_markers"  # Output topic carrying RViz markers for tracked objects.
+    tracked_marker_lifetime_sec: 1.0  # Marker lifetime in seconds for tracked-object RViz markers; finite lifetime clears stale boxes if the tracker stalls.
     decision_state_topic: "decision_state"  # Output topic carrying the current driving decision state.
     fusion_overlay_topic: "fusion_overlay_image"  # Output topic carrying the fusion overlay visualization.
     camera_sync_tolerance_ms: 200.0  # Maximum timestamp mismatch allowed between camera and LiDAR inputs.
@@ -82,6 +84,7 @@ fusion_core:
     camera_history_size: 10  # Number of recent camera frames retained for temporal matching.
     max_active_tracks: 128  # Hard upper bound on active tracker states to prevent runaway duplicate-track growth.
     lidar_association_distance_gate_m: 2.0  # Maximum planar distance in meters allowed for LiDAR track-to-detection association.
+    camera_stereo_association_distance_gate_m: 3.0  # Maximum planar distance in meters allowed for stereo-camera 3D support updates on unmatched tracks.
     initial_existence_probability: 0.55  # Initial existence score assigned to a newly created track.
     existence_probability_hit_gain: 0.20  # Existence score increase applied when a track is updated by LiDAR.
     existence_probability_miss_decay: 0.15  # Existence score decrease applied when a track misses a LiDAR update.

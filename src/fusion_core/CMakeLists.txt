@@ -25,25 +25,9 @@ find_package(vision_msgs REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 add_executable(fusion_core src/fusion_core.cpp)
-add_executable(tracking_based_fusion src/tracking_based_fusion.cpp)
 add_executable(ekf_multi_object_tracker src/ekf_multi_object_tracker.cpp)
 ament_target_dependencies(
   fusion_core
-  auto_stack_msgs
-  cv_bridge
-  geometry_msgs
-  OpenCV
-  rclcpp
-  sensor_msgs
-  std_msgs
-  tf2
-  tf2_geometry_msgs
-  tf2_ros
-  visualization_msgs
-  vision_msgs)
-
-ament_target_dependencies(
-  tracking_based_fusion
   auto_stack_msgs
   cv_bridge
   geometry_msgs
@@ -70,14 +54,11 @@ ament_target_dependencies(
   vision_msgs)
 
 target_include_directories(fusion_core PUBLIC ${OpenCV_INCLUDE_DIRS})
-target_include_directories(tracking_based_fusion PUBLIC ${OpenCV_INCLUDE_DIRS})
 
 target_link_libraries(fusion_core ${OpenCV_LIBS})
-target_link_libraries(tracking_based_fusion ${OpenCV_LIBS})
 
 install(TARGETS
   fusion_core
-  tracking_based_fusion
   ekf_multi_object_tracker
   DESTINATION lib/${PROJECT_NAME})
 

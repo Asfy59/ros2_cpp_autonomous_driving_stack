@@ -1,63 +1,48 @@
-# ROS2 C++ Perception And Sensor Fusion Mini-Stack
+# ROS2 C++ Perception And Tracking Mini-Stack
 
-This repository is a ROS2 C++ autonomous driving mini-stack built around KITTI replay.
+This repository is a ROS2 C++ autonomous-driving mini-stack built around KITTI replay.
 
-The project focuses on a compact perception pipeline:
+The active stack is centered on:
 
-- `lidar_processing` for LiDAR-side preprocessing and 3D object proposals
-- `camera_processing` for monocular YOLO detections and optional `CameraInfo`
-- `tracking_based_fusion` in `fusion_core` for map-frame LiDAR tracking, camera validation, and fused outputs
-- `visualization` for app-level bringup
+- `lidar_processing` for LiDAR 3D detections
+- `camera_processing` for stereo-camera 3D detections
+- `ekf_multi_object_tracker` in `fusion_core` for map-frame multi-object tracking
+- `visualization` for stack bringup and RViz
 
-The current stack already produces visible intermediate results from both sensing paths:
+`ekf_multi_object_tracker` is the main fusion and tracking node now. It is functional and used by the default bringup, but it is still under active tuning and refinement.
 
-- LiDAR preprocessing and 3D proposal extraction:
+## Active Pipeline
 
-![Raw vs processed LiDAR point cloud](docs/lidar_raw_vs_processed.png)
+`KITTI replay -> /lidar_pc -> lidar_processing -> /lidar_detections + /lidar_detection_markers`
 
-- camera detections on the monocular image stream:
+`KITTI replay -> stereo images -> camera_processing -> /camera_stereo_detections + /camera_stereo_detection_markers`
 
-![Camera object detection overlay](docs/Object_detection.png)
+`/lidar_detections + /camera_stereo_detections -> ekf_multi_object_tracker -> /tracked_objects + /tracked_markers`
 
-Current public stack outputs:
+## Current Outputs
 
-- `/tracked_objects` via `auto_stack_msgs/TrackedObjectArray`
-- `/decision_state` via `auto_stack_msgs/DecisionState`
-- `/tracked_object_markers` via `visualization_msgs/MarkerArray`
-- `/fusion_overlay_image` for image-space fusion debugging
-
-Current sensor-role split:
-
-- LiDAR is the primary source for geometry, range, and 3D proposals
-- camera is the primary source for semantics and image-space validation
-- fusion keeps the track state in the stable `map` frame and publishes object-level outputs
-
-## Current Pipeline
-
-`KITTI replay -> /lidar_pc -> lidar_processing -> /lidar_detections`
-
-`KITTI replay -> /p2_img -> camera_processing -> /object_detections + optional /p2_camera_info`
-
-`/lidar_detections + /object_detections + /p2_camera_info + /p2_img -> tracking_based_fusion -> /tracked_objects + /tracked_object_markers + /fusion_overlay_image + /decision_state`
+- `/tracked_objects`
+- `/tracked_markers`
+- `/lidar_detection_markers`
+- `/camera_stereo_detection_markers`
 
 ## Current Status
 
 Implemented:
 
-- custom LiDAR preprocessing with voxel-based clustering and oriented 3D boxes
-- custom monocular camera detections
-- KITTI calibration publication for the camera path
-- map-frame LiDAR tracking with camera-supported validation
-- RViz marker and image overlay debug outputs for fused tracks
-- sensor-style QoS on raw LiDAR and camera streams
-- runtime profiling and CSV logging for all three custom nodes
+- LiDAR preprocessing, clustering, and 3D detection publishing
+- stereo-camera 3D detection publishing
+- centralized EKF-based multi-object tracking in `map`
+- LiDAR-led object footprint tracking with stereo position support
+- RViz marker outputs for detections and tracked objects
+- stack-level bringup using the EKF tracker by default
 
-In progress:
+Still under work:
 
-- track lifecycle and association tuning
-- profiling-driven optimization
-- shared CPU / memory / rate metrics across custom nodes
-- stronger quantitative evaluation
+- tracker tuning for stability and lifecycle behavior
+- parameter refinement for static-scene performance
+- broader automated test coverage
+- downstream behavior or decision outputs
 
 ## Quick Start
 
@@ -71,10 +56,12 @@ source install/setup.bash
 Launch:
 
 ```bash
-ros2 launch visualization av_stack_bringup.launch.py dataset_path:=/path/to/kitti_dataset dataset_number:=0
+ros2 launch visualization av_stack_bringup.launch.py \
+  dataset_path:=/path/to/kitti_dataset \
+  dataset_number:=0
 ```
 
-Launch with RViz and the default run layout:
+Launch with RViz:
 
 ```bash
 ros2 launch visualization av_stack_bringup.launch.py \
@@ -83,15 +70,14 @@ ros2 launch visualization av_stack_bringup.launch.py \
   launch_rviz:=true
 ```
 
-Enable CSV profiling logs:
+Enable sensor-side CSV profiling logs:
 
 ```bash
 ros2 launch visualization av_stack_bringup.launch.py \
   dataset_path:=/path/to/kitti_dataset \
   dataset_number:=0 \
   enable_camera_csv_logging:=true \
-  enable_lidar_csv_logging:=true \
-  enable_fusion_csv_logging:=true
+  enable_lidar_csv_logging:=true
 ```
 
 ## Package Overview
@@ -116,43 +102,15 @@ Integrated infrastructure:
 
 ## Documentation
 
-Detailed implementation notes live in:
-
 - [docs/stack_details.md](/home/asfy/projects/covolv/ros2_av_stack_cpp/docs/stack_details.md)
-- [docs/v1_stack_contract.md](/home/asfy/projects/covolv/ros2_av_stack_cpp/docs/v1_stack_contract.md)
+- [docs/ekf_tracker_validation.md](/home/asfy/projects/covolv/ros2_av_stack_cpp/docs/ekf_tracker_validation.md)
 
-These cover:
+## Legacy Code
 
-- node responsibilities and current outputs
-- detailed processing steps for LiDAR, camera, and fusion
-- current tracking-frame and camera-validation assumptions
-- profiling coverage
-- TF / timestamp assumptions
-- visuals and pipeline notes
+The older tracking-based fusion implementation is archived and no longer built:
 
-## Visualization
-
-The default RViz run config at [visualize_run.rviz](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/ros2_kitti_replay/rviz/visualize_run.rviz) is aligned with the current stack and includes:
-
-- processed LiDAR point cloud
-- LiDAR detection markers
-- fusion overlay image
-- tracked-object markers
-- replay TF, vehicle models, and reference paths
-
-## Roadmap
-
-- [x] Integrate KITTI replay and visualization infrastructure
-- [x] Add custom LiDAR preprocessing node
-- [x] Add custom camera detections
-- [x] Add `tracking_based_fusion`
-- [x] Publish tracked object and decision outputs
-- [x] Add fused-track RViz and overlay debugging
-- [x] Add interval runtime profiling for custom nodes
-- [ ] Evaluate current fusion quality
-- [ ] Optimize latency and resource usage
-- [ ] Add shared CPU / memory / rate metrics
-- [ ] Improve testing and CI
+- [tracking_based_fusion_legacy.cpp](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/fusion_core/archive/tracking_based_fusion_legacy.cpp)
+- [av_stack_nodes_legacy.yaml](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/visualization/config/archive/av_stack_nodes_legacy.yaml)
 
 ## Attribution
 

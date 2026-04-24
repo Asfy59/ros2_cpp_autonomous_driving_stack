@@ -56,7 +56,9 @@ Useful sensor-side debug topics:
 - `/camera_stereo_detection_markers`
 - `/processed_lidar_pc`
 
-## Legacy Path
+## Archived Legacy Path
 
-The older `tracking_based_fusion` path is kept in the repository as legacy reference code.
-It is no longer the default stack bringup.
+The older tracking-based fusion path is archived and no longer built:
+
+- [tracking_based_fusion_legacy.cpp](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/fusion_core/archive/tracking_based_fusion_legacy.cpp)
+- [av_stack_nodes_legacy.yaml](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/visualization/config/archive/av_stack_nodes_legacy.yaml)

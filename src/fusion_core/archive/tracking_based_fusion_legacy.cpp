@@ -13,15 +13,23 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cmath>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -32,6 +40,53 @@
 #include <tf2_ros/transform_listener.h>
 
 #include <opencv2/imgproc.hpp>
+
+namespace
+{
+double read_process_cpu_time_ms()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    const double user_time_ms =
+        (static_cast<double>(usage.ru_utime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_utime.tv_usec) / 1000.0);
+    const double system_time_ms =
+        (static_cast<double>(usage.ru_stime.tv_sec) * 1000.0) +
+        (static_cast<double>(usage.ru_stime.tv_usec) / 1000.0);
+    return user_time_ms + system_time_ms;
+}
+
+double read_current_rss_mb()
+{
+    std::ifstream statm_stream("/proc/self/statm");
+    long total_pages = 0;
+    long resident_pages = 0;
+    if (!(statm_stream >> total_pages >> resident_pages))
+    {
+        return 0.0;
+    }
+    (void)total_pages;
+
+    const long page_size_bytes = sysconf(_SC_PAGESIZE);
+    return (static_cast<double>(resident_pages) * static_cast<double>(page_size_bytes)) /
+           (1024.0 * 1024.0);
+}
+
+double read_peak_rss_mb()
+{
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    {
+        return 0.0;
+    }
+
+    return static_cast<double>(usage.ru_maxrss) / 1024.0;
+}
+}  // namespace
 
 /*
  * Tracking-based fusion model summary
@@ -98,6 +153,8 @@ public:
             this->declare_parameter<std::string>("lidar_detections_topic", "lidar_detections");
         const auto camera_detections_topic =
             this->declare_parameter<std::string>("camera_detections_topic", "object_detections");
+        const auto camera_stereo_detections_topic =
+            this->declare_parameter<std::string>("camera_stereo_detections_topic", "camera_stereo_detections");
         const auto camera_info_topic =
             this->declare_parameter<std::string>("camera_info_topic", "p2_camera_info");
         const auto camera_image_topic =
@@ -112,6 +169,8 @@ public:
             this->declare_parameter<std::string>("fusion_overlay_topic", "fusion_overlay_image");
         const auto tracked_object_markers_topic =
             this->declare_parameter<std::string>("tracked_object_markers_topic", "tracked_object_markers");
+        tracked_marker_lifetime_sec_ =
+            this->declare_parameter<double>("tracked_marker_lifetime_sec", 1.0);
         camera_sync_tolerance_ms_ =
             this->declare_parameter<double>("camera_sync_tolerance_ms", 200.0);
         match_iou_threshold_ =
@@ -129,14 +188,20 @@ public:
             std::max(1, static_cast<int>(this->declare_parameter<int>("camera_history_size", 10)));
         max_active_tracks_ =
             std::max(1, static_cast<int>(this->declare_parameter<int>("max_active_tracks", 128)));
-        (void)this->declare_parameter<int>("profiling_interval_frames", 60);
+        profiling_interval_frames_ =
+            std::max(1, static_cast<int>(this->declare_parameter<int>("profiling_interval_frames", 60)));
         publish_overlay_image_ =
             this->declare_parameter<bool>("publish_overlay_image", true);
-        (void)this->declare_parameter<bool>("enable_csv_logging", false);
-        (void)this->declare_parameter<std::string>("csv_log_dir", "csv_logs/fusion_core");
-        (void)this->declare_parameter<std::string>("dataset_sequence", "unknown");
+        csv_logging_ =
+            this->declare_parameter<bool>("enable_csv_logging", false);
+        csv_log_dir_ =
+            this->declare_parameter<std::string>("csv_log_dir", "csv_logs/fusion_core");
+        dataset_sequence_ =
+            this->declare_parameter<std::string>("dataset_sequence", "unknown");
         lidar_association_distance_gate_m_ =
             this->declare_parameter<double>("lidar_association_distance_gate_m", 2.0);
+        camera_stereo_association_distance_gate_m_ =
+            this->declare_parameter<double>("camera_stereo_association_distance_gate_m", 3.0);
         initial_existence_probability_ =
             this->declare_parameter<double>("initial_existence_probability", 0.55);
         existence_probability_hit_gain_ =
@@ -163,11 +228,14 @@ public:
             this->declare_parameter<double>("lidar_measurement_noise_size_variance", 0.5);
 
         lidar_association_distance_gate_m_ = std::max(0.1, lidar_association_distance_gate_m_);
+        camera_stereo_association_distance_gate_m_ =
+            std::max(0.1, camera_stereo_association_distance_gate_m_);
         initial_existence_probability_ = std::clamp(initial_existence_probability_, 0.0, 1.0);
         existence_probability_hit_gain_ = std::clamp(existence_probability_hit_gain_, 0.0, 1.0);
         existence_probability_miss_decay_ = std::clamp(existence_probability_miss_decay_, 0.0, 1.0);
         track_confirmation_threshold_ = std::clamp(track_confirmation_threshold_, 0.0, 1.0);
         track_deletion_threshold_ = std::clamp(track_deletion_threshold_, 0.0, track_confirmation_threshold_);
+        tracked_marker_lifetime_sec_ = std::max(0.0, tracked_marker_lifetime_sec_);
         camera_sync_tolerance_ms_ = std::max(0.0, camera_sync_tolerance_ms_);
         match_iou_threshold_ = std::clamp(match_iou_threshold_, 0.0, 1.0);
         max_match_center_distance_px_ = std::max(1.0, max_match_center_distance_px_);
@@ -176,6 +244,10 @@ public:
         if (tracking_frame_.empty())
         {
             tracking_frame_ = "map";
+        }
+        if (dataset_sequence_.empty())
+        {
+            dataset_sequence_ = "unknown";
         }
         process_noise_position_variance_per_s2_ = std::max(0.0, process_noise_position_variance_per_s2_);
         process_noise_velocity_variance_per_s_ = std::max(0.0, process_noise_velocity_variance_per_s_);
@@ -203,6 +275,11 @@ public:
                 camera_detections_topic,
                 semantic_qos,
                 std::bind(&TrackingBasedFusion::camera_detections_callback, this, std::placeholders::_1));
+        camera_stereo_detections_subscription_ =
+            this->create_subscription<vision_msgs::msg::Detection3DArray>(
+                camera_stereo_detections_topic,
+                semantic_qos,
+                std::bind(&TrackingBasedFusion::camera_stereo_detections_callback, this, std::placeholders::_1));
 
         camera_info_subscription_ =
             this->create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -227,6 +304,9 @@ public:
             fusion_overlay_publisher_ =
                 this->create_publisher<sensor_msgs::msg::Image>(fusion_overlay_topic, semantic_qos);
         }
+
+        initialize_csv_logging();
+        reset_resource_window();
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -270,6 +350,20 @@ private:
         double height_m{0.0};
     };
 
+    struct CameraStereoMeasurement
+    {
+        std::size_t detection_index{0};
+        builtin_interfaces::msg::Time stamp;
+        double center_x_m{0.0};
+        double center_y_m{0.0};
+        double center_z_m{0.0};
+        double length_m{0.0};
+        double width_m{0.0};
+        double height_m{0.0};
+        std::string classification{"unknown"};
+        double confidence{0.0};
+    };
+
     struct FusedTrack
     {
         std::uint32_t track_id{0};
@@ -288,6 +382,7 @@ private:
         std::optional<std::size_t> associated_lidar_detection_index;
         std::optional<std::size_t> associated_camera_detection_index;
         bool camera_supported_this_frame{false};
+        bool stereo_supported_this_frame{false};
     };
 
     struct LidarAssociationMatch
@@ -363,18 +458,20 @@ private:
         double skew_ms{0.0};
     };
 
+    struct CameraStereoFrameSelection
+    {
+        std::shared_ptr<vision_msgs::msg::Detection3DArray> detections;
+        double skew_ms{0.0};
+    };
+
     static double normalize_angle_rad(double angle_rad)
     {
+        if (!std::isfinite(angle_rad))
+        {
+            return 0.0;
+        }
         constexpr double kPi = 3.14159265358979323846;
-        while (angle_rad > kPi)
-        {
-            angle_rad -= (2.0 * kPi);
-        }
-        while (angle_rad < -kPi)
-        {
-            angle_rad += (2.0 * kPi);
-        }
-        return angle_rad;
+        return std::remainder(angle_rad, 2.0 * kPi);
     }
 
     static double yaw_from_quaternion(
@@ -512,6 +609,47 @@ private:
         return lidar_measurements;
     }
 
+    std::vector<CameraStereoMeasurement> make_camera_stereo_measurements(
+        const vision_msgs::msg::Detection3DArray &camera_stereo_detections,
+        const tf2::Transform &camera_to_tracking_tf) const
+    {
+        std::vector<CameraStereoMeasurement> camera_stereo_measurements;
+        camera_stereo_measurements.reserve(camera_stereo_detections.detections.size());
+
+        for (std::size_t detection_index = 0;
+             detection_index < camera_stereo_detections.detections.size();
+             ++detection_index)
+        {
+            const auto &detection = camera_stereo_detections.detections[detection_index];
+
+            CameraStereoMeasurement measurement;
+            measurement.detection_index = detection_index;
+            measurement.stamp = camera_stereo_detections.header.stamp;
+            const tf2::Vector3 detection_center(
+                detection.bbox.center.position.x,
+                detection.bbox.center.position.y,
+                detection.bbox.center.position.z);
+            const tf2::Vector3 transformed_center = camera_to_tracking_tf * detection_center;
+            measurement.center_x_m = transformed_center.x();
+            measurement.center_y_m = transformed_center.y();
+            measurement.center_z_m = transformed_center.z();
+            measurement.length_m = detection.bbox.size.x;
+            measurement.width_m = detection.bbox.size.y;
+            measurement.height_m = detection.bbox.size.z;
+
+            if (!detection.results.empty())
+            {
+                const auto &hypothesis = detection.results.front().hypothesis;
+                measurement.classification = class_id_to_label(hypothesis.class_id);
+                measurement.confidence = hypothesis.score;
+            }
+
+            camera_stereo_measurements.push_back(measurement);
+        }
+
+        return camera_stereo_measurements;
+    }
+
     static double time_delta_ms(
         const builtin_interfaces::msg::Time &lhs,
         const builtin_interfaces::msg::Time &rhs)
@@ -637,6 +775,39 @@ private:
         double best_delta_ms = time_delta_ms(best_match->header.stamp, target_stamp);
 
         for (const auto &candidate : camera_detections_buffer_)
+        {
+            const double candidate_delta_ms = time_delta_ms(candidate->header.stamp, target_stamp);
+            if (candidate_delta_ms < best_delta_ms)
+            {
+                best_delta_ms = candidate_delta_ms;
+                best_match = candidate;
+            }
+        }
+
+        if (best_delta_ms > camera_sync_tolerance_ms_)
+        {
+            return selection;
+        }
+
+        selection.detections = best_match;
+        selection.skew_ms = best_delta_ms;
+        return selection;
+    }
+
+    CameraStereoFrameSelection find_nearest_camera_stereo_detections(
+        const builtin_interfaces::msg::Time &target_stamp)
+    {
+        CameraStereoFrameSelection selection;
+        std::lock_guard<std::mutex> lock(camera_mutex_);
+        if (camera_stereo_detections_buffer_.empty())
+        {
+            return selection;
+        }
+
+        auto best_match = camera_stereo_detections_buffer_.front();
+        double best_delta_ms = time_delta_ms(best_match->header.stamp, target_stamp);
+
+        for (const auto &candidate : camera_stereo_detections_buffer_)
         {
             const double candidate_delta_ms = time_delta_ms(candidate->header.stamp, target_stamp);
             if (candidate_delta_ms < best_delta_ms)
@@ -879,13 +1050,183 @@ private:
         return delta_time.seconds();
     }
 
+    static bool is_track_state_finite(const FusedTrack &track)
+    {
+        for (const double value : track.track_state)
+        {
+            if (!std::isfinite(value))
+            {
+                return false;
+            }
+        }
+        for (const double value : track.state_covariance)
+        {
+            if (!std::isfinite(value))
+            {
+                return false;
+            }
+        }
+        return std::isfinite(track.center_z_m) &&
+               std::isfinite(track.height_m) &&
+               std::isfinite(static_cast<double>(track.existence_probability));
+    }
+
     double compute_planar_distance_m(
         const FusedTrack &track,
         const LidarMeasurement &lidar_measurement) const
     {
+        if (!is_track_state_finite(track) ||
+            !std::isfinite(lidar_measurement.center_x_m) ||
+            !std::isfinite(lidar_measurement.center_y_m))
+        {
+            return std::numeric_limits<double>::infinity();
+        }
         const double delta_x_m = track.track_state[kPosXIndex] - lidar_measurement.center_x_m;
         const double delta_y_m = track.track_state[kPosYIndex] - lidar_measurement.center_y_m;
         return std::sqrt((delta_x_m * delta_x_m) + (delta_y_m * delta_y_m));
+    }
+
+    double compute_planar_distance_m(
+        const FusedTrack &track,
+        const CameraStereoMeasurement &camera_stereo_measurement) const
+    {
+        if (!is_track_state_finite(track) ||
+            !std::isfinite(camera_stereo_measurement.center_x_m) ||
+            !std::isfinite(camera_stereo_measurement.center_y_m))
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        const double delta_x_m = track.track_state[kPosXIndex] - camera_stereo_measurement.center_x_m;
+        const double delta_y_m = track.track_state[kPosYIndex] - camera_stereo_measurement.center_y_m;
+        return std::sqrt((delta_x_m * delta_x_m) + (delta_y_m * delta_y_m));
+    }
+
+    void update_track_with_camera_stereo_measurement(
+        FusedTrack &track,
+        const CameraStereoMeasurement &camera_stereo_measurement)
+    {
+        const auto update_scalar_state =
+            [&track](const std::size_t state_index, const double measurement_value, const double measurement_variance)
+            {
+                const double innovation = measurement_value - track.track_state[state_index];
+                const double innovation_variance =
+                    track.state_covariance[matrix_index(state_index, state_index)] + measurement_variance;
+                if (!std::isfinite(innovation) || !std::isfinite(innovation_variance) || innovation_variance <= 1e-9)
+                {
+                    return;
+                }
+
+                TrackStateVector kalman_gain{};
+                for (std::size_t row = 0; row < kTrackStateDim; ++row)
+                {
+                    kalman_gain[row] =
+                        track.state_covariance[matrix_index(row, state_index)] / innovation_variance;
+                }
+
+                for (std::size_t row = 0; row < kTrackStateDim; ++row)
+                {
+                    track.track_state[row] += kalman_gain[row] * innovation;
+                }
+
+                StateCovarianceMatrix updated_covariance = track.state_covariance;
+                for (std::size_t row = 0; row < kTrackStateDim; ++row)
+                {
+                    for (std::size_t column = 0; column < kTrackStateDim; ++column)
+                    {
+                        updated_covariance[matrix_index(row, column)] =
+                            track.state_covariance[matrix_index(row, column)] -
+                            (kalman_gain[row] * track.state_covariance[matrix_index(state_index, column)]);
+                    }
+                }
+                track.state_covariance = updated_covariance;
+            };
+
+        constexpr double kCameraStereoPositionVariance = 1.0;
+        constexpr double kCameraStereoSizeVariance = 1.5;
+        update_scalar_state(kPosXIndex, camera_stereo_measurement.center_x_m, kCameraStereoPositionVariance);
+        update_scalar_state(kPosYIndex, camera_stereo_measurement.center_y_m, kCameraStereoPositionVariance);
+        update_scalar_state(kLengthIndex, camera_stereo_measurement.length_m, kCameraStereoSizeVariance);
+        update_scalar_state(kWidthIndex, camera_stereo_measurement.width_m, kCameraStereoSizeVariance);
+
+        track.last_update_stamp = camera_stereo_measurement.stamp;
+        track.center_z_m = camera_stereo_measurement.center_z_m;
+        track.height_m = camera_stereo_measurement.height_m;
+        if (!camera_stereo_measurement.classification.empty() &&
+            camera_stereo_measurement.classification != "unknown")
+        {
+            track.classification = camera_stereo_measurement.classification;
+        }
+
+        const double support_gain = 0.5 * existence_probability_hit_gain_ *
+                                    std::clamp(0.5 + (0.5 * camera_stereo_measurement.confidence), 0.0, 1.0);
+        track.existence_probability = static_cast<float>(std::clamp(
+            static_cast<double>(track.existence_probability) + support_gain,
+            0.0,
+            1.0));
+    }
+
+    void update_tracks_with_camera_stereo_measurements(
+        const builtin_interfaces::msg::Time &target_stamp)
+    {
+        const auto camera_stereo_selection = find_nearest_camera_stereo_detections(target_stamp);
+        if (!camera_stereo_selection.detections)
+        {
+            return;
+        }
+
+        const auto camera_to_tracking_tf = lookup_transform(
+            tracking_frame_,
+            camera_stereo_selection.detections->header.frame_id,
+            camera_stereo_selection.detections->header.stamp);
+        if (!camera_to_tracking_tf)
+        {
+            return;
+        }
+
+        const auto camera_stereo_measurements =
+            make_camera_stereo_measurements(*camera_stereo_selection.detections, *camera_to_tracking_tf);
+        std::vector<bool> measurement_used(camera_stereo_measurements.size(), false);
+
+        for (auto &track : fused_tracks_)
+        {
+            if (track.associated_lidar_detection_index.has_value())
+            {
+                continue;
+            }
+
+            double best_distance_m = camera_stereo_association_distance_gate_m_;
+            std::optional<std::size_t> best_measurement_index;
+            for (std::size_t measurement_index = 0;
+                 measurement_index < camera_stereo_measurements.size();
+                 ++measurement_index)
+            {
+                if (measurement_used[measurement_index])
+                {
+                    continue;
+                }
+
+                const double planar_distance_m =
+                    compute_planar_distance_m(track, camera_stereo_measurements[measurement_index]);
+                if (planar_distance_m <= best_distance_m)
+                {
+                    best_distance_m = planar_distance_m;
+                    best_measurement_index = measurement_index;
+                }
+            }
+
+            if (!best_measurement_index)
+            {
+                continue;
+            }
+
+            update_track_with_camera_stereo_measurement(
+                track,
+                camera_stereo_measurements[*best_measurement_index]);
+            track.age_in_updates += 1;
+            track.stereo_supported_this_frame = true;
+            measurement_used[*best_measurement_index] = true;
+            refresh_track_confirmation_state(track);
+        }
     }
 
     static constexpr std::size_t matrix_index(const std::size_t row, const std::size_t column)
@@ -1043,7 +1384,7 @@ private:
                 track.state_covariance[matrix_index(state_index, state_index)] +
                 measurement_noise_matrix[(measurement_index * kLidarMeasurementDim) + measurement_index];
 
-            if (innovation_variance <= 1e-9)
+            if (!std::isfinite(innovation) || !std::isfinite(innovation_variance) || innovation_variance <= 1e-9)
             {
                 continue;
             }
@@ -1125,7 +1466,7 @@ private:
             {
                 used_columns[current_column] = true;
                 const std::size_t current_row = column_match[current_column];
-                double delta = large_cost;
+                double delta = std::numeric_limits<double>::infinity();
                 std::size_t next_column = 0;
 
                 for (std::size_t column = 1; column <= matrix_size; ++column)
@@ -1287,6 +1628,7 @@ private:
         track.associated_lidar_detection_index = std::nullopt;
         track.associated_camera_detection_index = std::nullopt;
         track.camera_supported_this_frame = false;
+        track.stereo_supported_this_frame = false;
     }
 
     void advance_unmatched_track(FusedTrack &track)
@@ -1454,6 +1796,7 @@ private:
             box_marker.scale.y = std::max(0.05, track.track_state[kWidthIndex]);
             box_marker.scale.z = std::max(0.05, track.height_m);
             box_marker.color = box_color;
+            box_marker.lifetime = rclcpp::Duration::from_seconds(tracked_marker_lifetime_sec_);
             marker_array.markers.push_back(box_marker);
 
             visualization_msgs::msg::Marker text_marker;
@@ -1473,6 +1816,7 @@ private:
             text_marker.text =
                 std::to_string(track.track_id) + " " +
                 track.classification + (camera_supported ? " cam" : " lidar");
+            text_marker.lifetime = rclcpp::Duration::from_seconds(tracked_marker_lifetime_sec_);
             marker_array.markers.push_back(text_marker);
 
             const double speed_mps = std::hypot(track.track_state[kVelXIndex], track.track_state[kVelYIndex]);
@@ -1494,6 +1838,7 @@ private:
             velocity_marker.color.g = 0.70F;
             velocity_marker.color.b = 1.0F;
             velocity_marker.color.a = 0.95F;
+            velocity_marker.lifetime = rclcpp::Duration::from_seconds(tracked_marker_lifetime_sec_);
 
             geometry_msgs::msg::Point start_point;
             start_point.x = output_pose.center.x();
@@ -1591,15 +1936,28 @@ private:
 
     void prune_deleted_tracks()
     {
+        const auto previous_track_count = fused_tracks_.size();
         fused_tracks_.erase(
             std::remove_if(
                 fused_tracks_.begin(),
                 fused_tracks_.end(),
                 [this](const FusedTrack &track)
                 {
-                    return static_cast<double>(track.existence_probability) <= track_deletion_threshold_;
+                    return !is_track_state_finite(track) ||
+                           static_cast<double>(track.existence_probability) <= track_deletion_threshold_;
                 }),
             fused_tracks_.end());
+
+        const auto removed_track_count = previous_track_count - fused_tracks_.size();
+        if (removed_track_count > 0U)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Pruned %zu invalid or expired tracks.",
+                removed_track_count);
+        }
     }
 
     void enforce_track_capacity()
@@ -1660,10 +2018,26 @@ private:
     void log_tracker_frame_metrics(const TrackerFrameMetrics &metrics)
     {
         tracker_frame_count_ += 1;
+        interval_frame_count_ += 1;
         cumulative_matches_ += metrics.matched_pairs;
         cumulative_new_tracks_ += metrics.new_tracks_created;
         cumulative_deleted_tracks_ += metrics.deleted_tracks;
         cumulative_processing_time_ms_ += metrics.processing_time_ms;
+        interval_sum_input_lidar_detections_ += static_cast<double>(metrics.input_lidar_detections);
+        interval_sum_active_tracks_ += static_cast<double>(fused_tracks_.size());
+        interval_sum_confirmed_tracks_ += static_cast<double>(metrics.confirmed_tracks_after_update);
+        interval_sum_camera_supported_tracks_ += static_cast<double>(metrics.camera_supported_tracks);
+        interval_sum_matches_ += static_cast<double>(metrics.matched_pairs);
+        interval_sum_new_tracks_ += static_cast<double>(metrics.new_tracks_created);
+        interval_sum_deleted_tracks_ += static_cast<double>(metrics.deleted_tracks);
+        interval_sum_unmatched_tracks_ += static_cast<double>(metrics.unmatched_tracks);
+        interval_sum_unmatched_measurements_ += static_cast<double>(metrics.unmatched_measurements);
+        interval_sum_average_match_distance_m_ += metrics.average_match_distance_m;
+        interval_sum_max_match_distance_m_ += metrics.max_match_distance_m;
+        interval_sum_camera_lidar_skew_ms_ += metrics.camera_lidar_skew_ms;
+        interval_sum_frame_total_ms_ += metrics.processing_time_ms;
+        interval_sum_rss_mb_ += read_current_rss_mb();
+        interval_sum_peak_rss_mb_ += read_peak_rss_mb();
 
         if ((tracker_frame_count_ % 10U) == 0U)
         {
@@ -1710,6 +2084,215 @@ private:
                 metrics.max_match_distance_m,
                 lidar_association_distance_gate_m_);
         }
+
+        if (interval_frame_count_ >= profiling_interval_frames_)
+        {
+            double avg_process_cpu_percent = 0.0;
+            double effective_output_rate_hz = 0.0;
+            compute_interval_resource_metrics(avg_process_cpu_percent, effective_output_rate_hz);
+
+            const double divisor = static_cast<double>(interval_frame_count_);
+            write_csv_interval_metrics(
+                interval_frame_count_,
+                interval_sum_input_lidar_detections_ / divisor,
+                interval_sum_active_tracks_ / divisor,
+                interval_sum_confirmed_tracks_ / divisor,
+                interval_sum_camera_supported_tracks_ / divisor,
+                interval_sum_matches_ / divisor,
+                interval_sum_new_tracks_ / divisor,
+                interval_sum_deleted_tracks_ / divisor,
+                interval_sum_unmatched_tracks_ / divisor,
+                interval_sum_unmatched_measurements_ / divisor,
+                interval_sum_average_match_distance_m_ / divisor,
+                interval_sum_max_match_distance_m_ / divisor,
+                interval_sum_camera_lidar_skew_ms_ / divisor,
+                interval_sum_frame_total_ms_ / divisor,
+                avg_process_cpu_percent,
+                effective_output_rate_hz,
+                interval_sum_rss_mb_ / divisor,
+                interval_sum_peak_rss_mb_ / divisor);
+
+            interval_frame_count_ = 0;
+            interval_sum_input_lidar_detections_ = 0.0;
+            interval_sum_active_tracks_ = 0.0;
+            interval_sum_confirmed_tracks_ = 0.0;
+            interval_sum_camera_supported_tracks_ = 0.0;
+            interval_sum_matches_ = 0.0;
+            interval_sum_new_tracks_ = 0.0;
+            interval_sum_deleted_tracks_ = 0.0;
+            interval_sum_unmatched_tracks_ = 0.0;
+            interval_sum_unmatched_measurements_ = 0.0;
+            interval_sum_average_match_distance_m_ = 0.0;
+            interval_sum_max_match_distance_m_ = 0.0;
+            interval_sum_camera_lidar_skew_ms_ = 0.0;
+            interval_sum_frame_total_ms_ = 0.0;
+            interval_sum_rss_mb_ = 0.0;
+            interval_sum_peak_rss_mb_ = 0.0;
+        }
+    }
+
+    void initialize_csv_logging()
+    {
+        if (!csv_logging_)
+        {
+            return;
+        }
+
+        try
+        {
+            const std::filesystem::path log_directory(csv_log_dir_);
+            std::filesystem::create_directories(log_directory);
+
+            csv_log_file_path_ = (log_directory / build_csv_filename()).string();
+            csv_log_stream_.open(csv_log_file_path_, std::ios::out | std::ios::trunc);
+            if (!csv_log_stream_.is_open())
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Failed to open CSV log file at '%s'. Disabling CSV logging.",
+                    csv_log_file_path_.c_str());
+                csv_logging_ = false;
+                return;
+            }
+
+            csv_log_stream_
+                << "timestamp_utc,dataset_sequence,interval_frames,avg_input_lidar_detections,avg_active_tracks,"
+                << "avg_confirmed_tracks,avg_camera_supported_tracks,avg_matches,avg_new_tracks,avg_deleted_tracks,"
+                << "avg_unmatched_tracks,avg_unmatched_measurements,avg_match_distance_m,avg_max_match_distance_m,"
+                << "avg_camera_lidar_skew_ms,avg_frame_time_ms,avg_process_cpu_percent,effective_output_rate_hz,"
+                << "avg_rss_mb,avg_peak_rss_mb,total_received_frames,total_processed_frames\n";
+            csv_log_stream_.flush();
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "CSV logging enabled. Writing interval metrics to '%s'.",
+                csv_log_file_path_.c_str());
+        }
+        catch (const std::exception &exception)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Failed to initialize CSV logging: %s. Disabling CSV logging.",
+                exception.what());
+            csv_logging_ = false;
+        }
+    }
+
+    void write_csv_interval_metrics(
+        const int interval_frames,
+        const double avg_input_lidar_detections,
+        const double avg_active_tracks,
+        const double avg_confirmed_tracks,
+        const double avg_camera_supported_tracks,
+        const double avg_matches,
+        const double avg_new_tracks,
+        const double avg_deleted_tracks,
+        const double avg_unmatched_tracks,
+        const double avg_unmatched_measurements,
+        const double avg_match_distance_m,
+        const double avg_max_match_distance_m,
+        const double avg_camera_lidar_skew_ms,
+        const double avg_frame_time_ms,
+        const double avg_process_cpu_percent,
+        const double effective_output_rate_hz,
+        const double avg_rss_mb,
+        const double avg_peak_rss_mb)
+    {
+        if (!csv_logging_ || !csv_log_stream_.is_open())
+        {
+            return;
+        }
+
+        csv_log_stream_ << current_utc_timestamp("%Y-%m-%dT%H:%M:%SZ") << ','
+                        << dataset_sequence_ << ','
+                        << interval_frames << ','
+                        << std::fixed << std::setprecision(2)
+                        << avg_input_lidar_detections << ','
+                        << avg_active_tracks << ','
+                        << avg_confirmed_tracks << ','
+                        << avg_camera_supported_tracks << ','
+                        << avg_matches << ','
+                        << avg_new_tracks << ','
+                        << avg_deleted_tracks << ','
+                        << avg_unmatched_tracks << ','
+                        << avg_unmatched_measurements << ','
+                        << avg_match_distance_m << ','
+                        << avg_max_match_distance_m << ','
+                        << avg_camera_lidar_skew_ms << ','
+                        << avg_frame_time_ms << ','
+                        << avg_process_cpu_percent << ','
+                        << effective_output_rate_hz << ','
+                        << avg_rss_mb << ','
+                        << avg_peak_rss_mb << ','
+                        << total_received_frames_ << ','
+                        << total_processed_frames_ << '\n';
+        csv_log_stream_.flush();
+    }
+
+    std::string build_csv_filename() const
+    {
+        std::ostringstream filename_builder;
+        filename_builder << this->get_name()
+                         << "_seq_"
+                         << sanitize_for_filename(dataset_sequence_)
+                         << "_"
+                         << current_utc_timestamp("%Y-%m-%dT%H-%M-%S")
+                         << ".csv";
+        return filename_builder.str();
+    }
+
+    std::string current_utc_timestamp(const char *format) const
+    {
+        const auto now = std::chrono::system_clock::now();
+        const auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm utc_time{};
+        gmtime_r(&now_time_t, &utc_time);
+
+        std::ostringstream timestamp_builder;
+        timestamp_builder << std::put_time(&utc_time, format);
+        return timestamp_builder.str();
+    }
+
+    static std::string sanitize_for_filename(std::string value)
+    {
+        for (char &character : value)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(character)) &&
+                character != '-' &&
+                character != '_')
+            {
+                character = '_';
+            }
+        }
+        return value;
+    }
+
+    void reset_resource_window()
+    {
+        interval_resource_window_start_ = std::chrono::steady_clock::now();
+        interval_resource_window_cpu_ms_ = read_process_cpu_time_ms();
+    }
+
+    void compute_interval_resource_metrics(
+        double &avg_process_cpu_percent,
+        double &effective_output_rate_hz)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_wall_ms =
+            std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                now - interval_resource_window_start_)
+                .count();
+        const double current_cpu_ms = read_process_cpu_time_ms();
+        const double elapsed_cpu_ms =
+            std::max(0.0, current_cpu_ms - interval_resource_window_cpu_ms_);
+
+        avg_process_cpu_percent =
+            elapsed_wall_ms > 0.0 ? (100.0 * elapsed_cpu_ms / elapsed_wall_ms) : 0.0;
+        effective_output_rate_hz =
+            elapsed_wall_ms > 0.0 ? (1000.0 * static_cast<double>(interval_frame_count_) / elapsed_wall_ms) : 0.0;
+
+        interval_resource_window_start_ = now;
+        interval_resource_window_cpu_ms_ = current_cpu_ms;
     }
 
     auto_stack_msgs::msg::TrackedObjectArray build_tracked_objects_from_tracks(
@@ -1810,9 +2393,15 @@ private:
             refresh_track_confirmation_state(matched_track);
         }
 
+        update_tracks_with_camera_stereo_measurements(lidar_detections.header.stamp);
+
         for (const auto unmatched_track_index : association_result.unmatched_track_indices)
         {
             auto &unmatched_track = fused_tracks_[unmatched_track_index];
+            if (unmatched_track.stereo_supported_this_frame)
+            {
+                continue;
+            }
             advance_unmatched_track(unmatched_track);
             refresh_track_confirmation_state(unmatched_track);
         }
@@ -1868,6 +2457,7 @@ private:
         const auto frame_end_time = std::chrono::steady_clock::now();
         metrics.processing_time_ms =
             std::chrono::duration<double, std::milli>(frame_end_time - frame_start_time).count();
+        total_processed_frames_ += 1U;
         log_tracker_frame_metrics(metrics);
     }
 
@@ -1876,6 +2466,7 @@ private:
         latest_lidar_detections_ = msg;
         if (msg)
         {
+            total_received_frames_ += 1U;
             process_lidar_frame(*msg);
         }
         RCLCPP_DEBUG(
@@ -1897,6 +2488,22 @@ private:
         RCLCPP_DEBUG(
             this->get_logger(),
             "TrackingBasedFusion received %zu camera detections.",
+            msg ? msg->detections.size() : 0U);
+    }
+
+    void camera_stereo_detections_callback(const vision_msgs::msg::Detection3DArray::SharedPtr msg)
+    {
+        {
+            std::lock_guard<std::mutex> lock(camera_mutex_);
+            camera_stereo_detections_buffer_.push_back(msg);
+            while (static_cast<int>(camera_stereo_detections_buffer_.size()) > camera_history_size_)
+            {
+                camera_stereo_detections_buffer_.pop_front();
+            }
+        }
+        RCLCPP_DEBUG(
+            this->get_logger(),
+            "TrackingBasedFusion received %zu stereo camera detections.",
             msg ? msg->detections.size() : 0U);
     }
 
@@ -1922,6 +2529,7 @@ private:
 
     rclcpp::Subscription<vision_msgs::msg::Detection3DArray>::SharedPtr lidar_detections_subscription_;
     rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr camera_detections_subscription_;
+    rclcpp::Subscription<vision_msgs::msg::Detection3DArray>::SharedPtr camera_stereo_detections_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr camera_image_subscription_;
 
@@ -1933,6 +2541,7 @@ private:
     vision_msgs::msg::Detection3DArray::SharedPtr latest_lidar_detections_;
     sensor_msgs::msg::CameraInfo::SharedPtr latest_camera_info_;
     std::deque<vision_msgs::msg::Detection2DArray::SharedPtr> camera_detections_buffer_;
+    std::deque<vision_msgs::msg::Detection3DArray::SharedPtr> camera_stereo_detections_buffer_;
     std::deque<sensor_msgs::msg::Image::SharedPtr> camera_image_buffer_;
     mutable std::mutex camera_mutex_;
     tf2_ros::Buffer tf_buffer_;
@@ -1945,7 +2554,29 @@ private:
     std::size_t cumulative_new_tracks_{0};
     std::size_t cumulative_deleted_tracks_{0};
     double cumulative_processing_time_ms_{0.0};
+    int interval_frame_count_{0};
+    double interval_sum_input_lidar_detections_{0.0};
+    double interval_sum_active_tracks_{0.0};
+    double interval_sum_confirmed_tracks_{0.0};
+    double interval_sum_camera_supported_tracks_{0.0};
+    double interval_sum_matches_{0.0};
+    double interval_sum_new_tracks_{0.0};
+    double interval_sum_deleted_tracks_{0.0};
+    double interval_sum_unmatched_tracks_{0.0};
+    double interval_sum_unmatched_measurements_{0.0};
+    double interval_sum_average_match_distance_m_{0.0};
+    double interval_sum_max_match_distance_m_{0.0};
+    double interval_sum_camera_lidar_skew_ms_{0.0};
+    double interval_sum_frame_total_ms_{0.0};
+    double interval_sum_rss_mb_{0.0};
+    double interval_sum_peak_rss_mb_{0.0};
+    std::chrono::steady_clock::time_point interval_resource_window_start_;
+    double interval_resource_window_cpu_ms_{0.0};
+    std::uint64_t total_received_frames_{0};
+    std::uint64_t total_processed_frames_{0};
     double lidar_association_distance_gate_m_{2.0};
+    double camera_stereo_association_distance_gate_m_{3.0};
+    double tracked_marker_lifetime_sec_{1.0};
     double initial_existence_probability_{0.55};
     double existence_probability_hit_gain_{0.20};
     double existence_probability_miss_decay_{0.15};
@@ -1965,8 +2596,14 @@ private:
     double min_projection_depth_m_{0.10};
     int camera_history_size_{10};
     int max_active_tracks_{128};
+    int profiling_interval_frames_{60};
+    bool csv_logging_{false};
     bool publish_overlay_image_{true};
+    std::string csv_log_dir_{"csv_logs/fusion_core"};
+    std::string csv_log_file_path_;
+    std::string dataset_sequence_{"unknown"};
     std::string tracking_frame_{"map"};
+    std::ofstream csv_log_stream_;
 };
 
 int main(int argc, char *argv[])
