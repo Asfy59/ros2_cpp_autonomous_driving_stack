@@ -21,7 +21,7 @@ Stereo-camera detections:
 
 ![Camera object detection overlay](docs/Object_detection.png)
 
-Tracked-object visualization:
+Tracked-object visualization(WIP):
 
 ![Tracked objects placeholder](docs/tracked_objects_placeholder.png)
 
