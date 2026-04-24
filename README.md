@@ -23,7 +23,7 @@ Stereo-camera detections:
 
 Tracked-object visualization:
 
-![Tracked objects placeholder](docs/tracked_objects_placeholder.svg)
+![Tracked objects placeholder](docs/tracked_objects_placeholder.png)
 
 ## Active Pipeline
 
