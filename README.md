@@ -11,6 +11,20 @@ The active stack is centered on:
 
 `ekf_multi_object_tracker` is the main fusion and tracking node now. It is functional and used by the default bringup, but it is still under active tuning and refinement.
 
+## Current Visuals
+
+LiDAR preprocessing and 3D proposal extraction:
+
+![Raw vs processed LiDAR point cloud](docs/lidar_raw_vs_processed.png)
+
+Stereo-camera detections:
+
+![Camera object detection overlay](docs/Object_detection.png)
+
+Tracked-object visualization:
+
+![Tracked objects placeholder](docs/tracked_objects_placeholder.svg)
+
 ## Active Pipeline
 
 `KITTI replay -> /lidar_pc -> lidar_processing -> /lidar_detections + /lidar_detection_markers`
@@ -104,13 +118,6 @@ Integrated infrastructure:
 
 - [docs/stack_details.md](/home/asfy/projects/covolv/ros2_av_stack_cpp/docs/stack_details.md)
 - [docs/ekf_tracker_validation.md](/home/asfy/projects/covolv/ros2_av_stack_cpp/docs/ekf_tracker_validation.md)
-
-## Legacy Code
-
-The older tracking-based fusion implementation is archived and no longer built:
-
-- [tracking_based_fusion_legacy.cpp](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/fusion_core/archive/tracking_based_fusion_legacy.cpp)
-- [av_stack_nodes_legacy.yaml](/home/asfy/projects/covolv/ros2_av_stack_cpp/src/visualization/config/archive/av_stack_nodes_legacy.yaml)
 
 ## Attribution
 
